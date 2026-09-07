@@ -219,6 +219,11 @@ function updateHud(now: number): void {
     `\nDRIVES\n${rows}\n\nINTENTIONS\n${desires}\n\nMOTOR\n${motor}${flashLine}`;
 }
 
+// A debug handle. The preview exists to be poked at — from the browser console,
+// or by a script driving the page — and without a way in, every question about
+// what the simulation is doing has to be answered by squinting at pixels.
+(window as unknown as { aquarium: unknown }).aquarium = { world, renderer, camera };
+
 // A short delay before the first frame lets the fin sheets settle from their
 // straight starting pose, so the first thing you see is a fish rather than a
 // fish with its fins sticking out like a paper aeroplane.

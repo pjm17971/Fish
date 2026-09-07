@@ -89,6 +89,16 @@ final class World {
         // pause — must not be integrated as though it really happened, or the fish
         // teleports and the water explodes.
         let frameDt = clampd(dt, 0, 0.05)
+
+        // A zero-length step is a no-op, and has to be handled rather than run
+        // through the integrators with dt = 0.
+        //
+        // The fin sweep divides by the timestep to get node velocities, so at
+        // dt = 0 that is 1/0 = Infinity times a zero displacement, which is NaN,
+        // and a NaN fin node stays NaN for the rest of the run. A display link
+        // that reports the same timestamp twice is enough to trigger it.
+        if frameDt <= 0 { return }
+
         time += frameDt
 
         // 1. Viewer motion, for looming. Differentiated here rather than trusted

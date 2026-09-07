@@ -65,6 +65,49 @@ test('nothing in a long run goes non-finite', () => {
   }
 });
 
+test('an uneven frame rate does not break anything', () => {
+  // Every other test in this file steps at a fixed 1/60, and for a long time
+  // that hid a real bug: a browser gives two animation frames the same timestamp
+  // fairly often — reliably on the first frame after a page loads — and a
+  // zero-length step ran straight into a division by the timestep in the fin
+  // sweep. One such frame turned every fin node into NaN, permanently, and the
+  // fins rendered as huge stretched sheets across the tank.
+  //
+  // So this steps the way a real frame loop does: unevenly, with the occasional
+  // zero, an occasional stall, and an occasional very short frame.
+  const world = new World({ seed: 101, timeScale: 30 });
+
+  const finite = (label: string) => {
+    const p = world.locomotion.position;
+    assert.ok(Number.isFinite(p.x + p.y + p.z), `fish position went non-finite ${label}`);
+    for (const fin of world.fins) {
+      for (let i = 0; i < fin.pos.length; i++) {
+        assert.ok(Number.isFinite(fin.pos[i]), `${fin.spec.name} fin went non-finite ${label}`);
+      }
+    }
+    for (let i = 0; i < world.water.height.length; i++) {
+      assert.ok(Number.isFinite(world.water.height[i]), `water went non-finite ${label}`);
+    }
+  };
+
+  // The first frame a browser delivers often has no elapsed time at all.
+  world.step(0);
+  finite('after a zero-length first frame');
+
+  const rng = new Rng(2024);
+  for (let i = 0; i < 3000; i++) {
+    let dt: number;
+    const roll = rng.next();
+    if (roll < 0.04) dt = 0;                       // duplicate timestamp
+    else if (roll < 0.06) dt = 0.4;                // a stall, which step() clamps
+    else if (roll < 0.09) dt = 1e-7;               // a very short frame
+    else dt = 0.008 + rng.next() * 0.020;          // 33 to 120 fps
+    world.step(dt);
+    if (i % 250 === 0) finite(`at step ${i}`);
+  }
+  finite('at the end');
+});
+
 test('the fish does not dither between intentions', () => {
   // A plain argmax over competing desires produces a fish that flickers between
   // two nearly equal options many times a second, which is the single most

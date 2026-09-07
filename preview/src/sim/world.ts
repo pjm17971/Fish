@@ -113,6 +113,19 @@ export class World {
     // pause — must not be integrated as though it really happened, or the fish
     // teleports and the water explodes.
     const frameDt = clamp(dt, 0, 0.05);
+
+    // A zero-length step is a no-op, and has to be handled rather than run
+    // through the integrators with dt = 0.
+    //
+    // This is not a hypothetical. A browser hands two animation frames the same
+    // timestamp fairly regularly — reliably on the first frame after load — and
+    // the fin sweep divides by the timestep to get node velocities. At dt = 0
+    // that is 1/0 = Infinity, multiplied by a zero displacement, which is NaN;
+    // and once a fin node is NaN it stays NaN, so the fins are wrecked for the
+    // rest of the run. The test suite missed it for a long time because every
+    // test steps at a fixed 1/60 and never sees a zero.
+    if (frameDt <= 0) return;
+
     this.time += frameDt;
 
     // 1. Viewer motion, for looming. Differentiated here rather than trusted

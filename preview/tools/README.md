@@ -33,4 +33,6 @@ build`. Several of them run a long simulated time and take a minute or two.
 | `probe-brain` | drives and the chosen intention over a long run |
 | `probe-breathe` | air debt building and discharging; long-running |
 | `probe-surface` | the approach to the surface, mouth height against water height |
+| `probe-finmesh` | the fin *render* meshes: bounding box, longest triangle edge. Written to tell a simulation bug from a rendering one, which it did |
+| `probe-finspan` | each fin's chord, span and link lengths, against the shape it is supposed to be |
 | `timing.mjs` | milliseconds per simulated step, broken down by subsystem |

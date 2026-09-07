@@ -471,7 +471,6 @@ void main() {
   colour *= uWaterTint;
 
   fragColour = vec4(tonemap(colour * uExposure), 1.0);
-  void(uTime);
 }
 `;
 
@@ -691,7 +690,6 @@ void main() {
   colour += uLightColour * spec * 0.35 * (1.0 - float(fromBelow) * 0.7);
 
   fragColour = vec4(tonemap(colour * uExposure), 1.0);
-  void(vUV); void(vExtra); void(uCaustics); void(uCausticsExtent); void(uWaterY);
 }
 `;
 
