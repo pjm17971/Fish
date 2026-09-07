@@ -30,6 +30,22 @@
         max-height: calc(100vh - 24px);
         overflow: hidden;
       }
+      #toggle {
+        position: fixed; top: 12px; right: 12px;
+        padding: 8px 12px;
+        background: rgba(6, 10, 11, 0.72);
+        border: 1px solid rgba(150, 190, 180, 0.16);
+        border-radius: 8px;
+        color: inherit;
+        font: inherit;
+        font-size: 12px;
+        letter-spacing: 0.02em;
+        cursor: pointer;
+        backdrop-filter: blur(6px);
+        touch-action: manipulation;
+      }
+      #toggle:hover { border-color: rgba(150, 190, 180, 0.4); }
+      #toggle:focus-visible { outline: 2px solid rgba(150, 190, 180, 0.5); outline-offset: 2px; }
       #help {
         position: fixed; bottom: 12px; left: 12px;
         padding: 10px 14px;
@@ -56,6 +72,7 @@
   <body>
     <canvas id="view"></canvas>
     <div id="hud">starting…</div>
+    <button id="toggle" type="button" aria-pressed="true">hide readout</button>
     <div id="help">drag  orbit
 wheel zoom
 double-click on the water  drop food

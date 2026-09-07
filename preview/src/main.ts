@@ -103,14 +103,26 @@ canvas.addEventListener('pointerleave', () => {
 });
 
 let showHud = true;
+
+// An on-screen toggle as well as the key, because a phone has no `h`.
+const toggle = document.getElementById('toggle') as HTMLButtonElement;
+function setHud(on: boolean): void {
+  showHud = on;
+  hud.style.display = on ? '' : 'none';
+  toggle.textContent = on ? 'hide readout' : 'show readout';
+  toggle.setAttribute('aria-pressed', String(on));
+}
+toggle.addEventListener('click', (e) => {
+  e.stopPropagation();
+  setHud(!showHud);
+});
 let paused = false;
 let timeScale = 1;
 
 window.addEventListener('keydown', (e) => {
   switch (e.key) {
     case 'h':
-      showHud = !showHud;
-      hud.style.display = showHud ? '' : 'none';
+      setHud(!showHud);
       break;
     case ' ':
       paused = !paused;
