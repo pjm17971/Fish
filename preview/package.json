@@ -1,0 +1,17 @@
+{
+  "name": "aquarium-preview",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Desktop preview + testbed for the phone aquarium simulation",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test dist/test/",
+    "serve": "node tools/serve.js",
+    "start": "npm run build && node tools/serve.js"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "typescript": "^5.9.3"
+  }
+}
