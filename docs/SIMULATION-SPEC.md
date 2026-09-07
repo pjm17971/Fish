@@ -4,6 +4,15 @@ This is the single source of truth for the numerical models. The TypeScript
 simulation (`preview/src/sim`) and the Swift simulation (`ios/Aquarium/Sources/Sim`)
 are two ports of *this* document, not of each other. If they disagree, this file wins.
 
+One caveat on that, stated plainly rather than left to be discovered. Building the
+thing changed a good many of these numbers — a dozen or so of them were wrong in
+ways only a running simulation could show, and the reasons are recorded in the
+sections below and at more length in the comments in `preview/src/sim/config.ts`.
+Where a constant is concerned, `config.ts` and `SimConfig.swift` are checked
+against each other and are the working record; this document explains *why* each
+one is what it is. If you find one that has drifted, the code is the fact and this
+is the argument.
+
 Everything is SI: metres, kilograms, seconds, radians. Water is fresh water at 25 °C
 (`rho = 997 kg/m^3`, kinematic viscosity `nu = 8.9e-7 m^2/s`).
 
@@ -69,14 +78,33 @@ Segment mass is distributed by cross-sectional area so the centre of mass lands 
 
 | Fin | Count | Attach range in `s` | Span | Simulated as |
 |---|---|---|---|---|
-| Caudal (tail) | 1 | at `s = 1` | `0.024 m` chord, `0.030 m` span | cloth, 9x11 grid |
-| Dorsal (top) | 1 | `0.46 – 0.92` | `0.019 m` height | cloth, 7x9 grid |
-| Anal (bottom) | 1 | `0.42 – 0.98` | `0.023 m` height | cloth, 7x13 grid |
+| Caudal (tail) | 1 | at `s = 1` | `0.024 m` chord, `0.030 m` span | trailing sheet, 9x11 nodes |
+| Dorsal (top) | 1 | `0.46 – 0.92` | `0.019 m` height | trailing sheet, 7x9 |
+| Anal (bottom) | 1 | `0.42 – 0.98` | `0.023 m` height | trailing sheet, 7x13 |
 | Pectoral (side) | 2 | `0.30` | `0.011 m` | rigid, kinematically beaten |
-| Pelvic (ventral) | 2 | `0.33` | `0.016 m` | cloth, 3x7 strip |
+| Pelvic (ventral) | 2 | `0.33` | `0.016 m` | trailing sheet, 3x7 |
 
 Pectorals are the exception: they are the *engine* for slow swimming, not passive
-surfaces, so they are driven directly (section 4.3) rather than simulated as cloth.
+surfaces, so they are driven directly (section 4.3).
+
+**How the trailing fins are simulated, and why not as cloth.** The first version
+solved each fin as a proper cloth — a grid of masses joined by distance
+constraints, relaxed a few times a step. It was wrong twice over. Numerically it
+rang: a fin ray's natural frequency is 30–60 Hz, far above any tail beat, so
+every disturbance stayed in the fin indefinitely, and once those vibrations were
+allowed to push back on the water the fish swam on its pelvic fins alone.
+Physically it was double counting: the same water was being accelerated once by
+the body and again by the fin attached to it.
+
+What is there now is a *length-exact chain sweep*. Each fin ray is walked from
+its two driven roots outwards, and each node is placed at exactly its rest
+distance from the previous one, in the direction it is being dragged. The ray can
+therefore never stretch, never ring, and never gain energy, and it trails and
+lags the way real fin tissue does. The fins contribute **shape only**. All the
+hydrodynamic force they generate is accounted for in the body chain instead,
+where the caudal fin appears as six extra segments past the peduncle and the
+dorsal and anal fins are folded into the local body depth (`hydroDepth`,
+section 1.1). One surface, one force.
 
 ---
 
@@ -112,7 +140,7 @@ three broadleaf plants — a betta rests on leaves, so at least one leaf is plac
 ### 3.1 Surface: damped wave equation on a height field
 
 The surface is a height field `u(x, z, t)` — a displacement from the still level —
-on a grid of `NX x NZ` cells (`128 x 92` on iOS, `96 x 68` in the preview).
+on a grid of `NX x NZ` cells — `80 x 58`, the same on both platforms.
 
 ```
 d2u/dt2 = c^2 * lap(u) + alpha * c * lap(du/dt) - beta * du/dt + F
@@ -121,16 +149,40 @@ d2u/dt2 = c^2 * lap(u) + alpha * c * lap(du/dt) - beta * du/dt + F
 - `c` is the wave speed. For long waves in shallow water `c = sqrt(g * h_water)`
   = `sqrt(9.81 * 0.085)` = **0.913 m/s**. This is not a tuned number; it is the
   shallow-water result, and it is what makes the slosh period come out right.
-- `alpha = 0.008` — viscous smoothing of the *velocity* field (removes grid-scale
-  buzz without killing the wave).
+- `alpha = 0.0005` — viscous smoothing of the *velocity* field (removes grid-scale
+  buzz without killing the wave). The value is set by the stability condition
+  below, not chosen for looks.
 - `beta = 0.45 s^-1` — bulk damping. Chosen so a disturbance decays over ~4 seconds,
   matching a small tank.
 - `F` is the forcing (3.2).
 
-Integrated explicitly with the standard 5-point Laplacian. Stability requires
-`c * dt / dx <= 1/sqrt(2)`. With `dx = W/NX = 2.73 mm` and `c = 0.913`, the limit is
-`dt <= 2.1 ms`, so the water substeps at a fixed `dt_water = 1.5 ms` regardless of
-frame rate.
+Integrated explicitly with the standard 5-point Laplacian, and there are **two**
+stability conditions, not one.
+
+The familiar one is the wave (CFL) condition, `c * dt / dx <= 1/sqrt(2)`. With
+`dx = W/NX = 4.375 mm` and `c = 0.913 m/s` that gives `dt <= 3.4 ms`.
+
+The second one is the reason `alpha` is as small as it is. Taken on its own the
+viscous term is a diffusion, so the obvious limit is
+`alpha * c * dt / dx^2 <= 1/2`. That limit is far too generous, because the wave
+term and the viscous term share the same velocity update; writing out the
+two-by-two amplification matrix of the *combined* scheme gives the real
+requirement:
+
+```
+dt * (alpha * c * lambda_max + beta) < 1
+```
+
+where `lambda_max = 4*(1/dx^2 + 1/dz^2)` is the largest eigenvalue of the
+discrete Laplacian. The first value tried, `alpha = 0.008`, sat at 40 % of the
+diffusion limit and 160 % of this one. The surface behaved impeccably when left
+alone and went to NaN within about a second of the phone being shaken hard —
+the shortest wavelength the grid can hold grew instead of decaying.
+
+The water substeps at a fixed `dt_water = 2.5 ms` regardless of frame rate: 74 %
+of the wave limit and 59 % of the damping limit. Both conditions are asserted in
+the constructor, so changing the grid, the timestep or the damping cannot quietly
+reintroduce the failure.
 
 **Check that falls out of this:** the fundamental sloshing period of a rectangular tank
 is `T1 = 2W / sqrt(g * h_water)` = `0.70/0.913` = **0.77 s**. Test `water.slosh`
@@ -225,17 +277,36 @@ subcarangiform swimmers, not a stylistic choice.
 under one full wave is visible on the fish at any instant. This is the subcarangiform
 range (anguilliform eels run ~0.6 SL, thunniform tuna ~1.2 SL).
 
-Turning bend shape, zero at the head so the fish pivots about its front third:
+Turning is *not* a static bend. A real fish does not hold itself in a curve and
+coast round; it beats its tail asymmetrically, sweeping further to one side than
+the other, and adds a gentle camber to the whole body. Both are here, and they
+follow the amplitude envelope rather than an independent curve:
 
 ```
-bend(s) = 0.010 m * s^1.6
+offset(s) = (kappa_beat * 0.0038 m + kappa_camber * 0.010 m) * A(s)/A_tip
 ```
+
+The `0.0038 m` is about 80 % of the beat's own amplitude, which makes a strongly
+one-sided sweep without the tail ever crossing the centreline. An earlier version
+used `0.010 m` for the beat term as well, which swung the fin tip nearly forty
+millimetres off the centreline — an escape-grade C-shape — several times a
+second; the entrained water on the tail turned each of those flips into fifteen
+to twenty times the fish's weight in force and threw it across the tank at twelve
+body lengths a second. A reflex may exceed this by `2.4x`, because a C-start
+genuinely is that extreme a posture.
 
 **Amplitude is not free.** Real fish hold tail-beat amplitude nearly constant at about
 20 % of body length peak-to-peak and change speed by changing *frequency*. So
 `A_tip = 0.10 * SL = 4.8 mm` (half of 20 %) during steady swimming, reduced only at the
 very bottom of the speed range where the fish switches to pectoral fins (4.3), and
 raised to `0.16 * SL` in an escape burst.
+
+**Where the amplitude is measured matters.** The 20 % figure is measured at the
+trailing edge of the tail fin, not at the peduncle where the flesh ends. On this
+fish the caudal fin is half a body length again, so the two points are at
+`s = 1.5` and `s = 1.0` and the envelope has grown by a factor of 2.375 between
+them. Normalising at the wrong one gave a fish beating its tail with well over
+twice the sweep any real fish uses.
 
 ### 4.2 Hydrodynamic forces
 
@@ -408,7 +479,7 @@ anything else.
 | `hunger` | continuously, faster when active | eating a pellet: `-0.16` each | full swing ~6 h |
 | `airDebt` | continuously, `+2.2x` when swimming hard | a surface gulp: to 0 | forces a gulp every 4–11 min |
 | `fear` | looming, impacts, sudden light change | exponential decay | `tau = 26 s` |
-| `fatigue` | with burst swimming (cube of speed) | slowly, faster at rest | `tau_recover = 90 s` |
+| `fatigue` | above an aerobic cruise of `4 SL/s`, with the cube of the excess | slowly, faster at rest | `tau_recover = 90 s` |
 | `aggression` | seeing a rival (reflection / face) | exponential decay | `tau = 45 s`, refractory 20 s |
 | `boredom` | in familiar places | exploring novelty | drives patrolling |
 
@@ -450,11 +521,16 @@ Selection has three guards, all from the 1994 paper:
 2. **Persistence.** The current intention keeps a bonus of `0.12` while it runs, so a
    challenger must be clearly better, not marginally better, to take over.
 3. **Minimum dwell.** Once selected, an intention holds for at least `0.6 s`
-   (`0.15 s` for `escape`). Nothing can switch faster than that.
+   (`0.5 s` for `avoid`, `0.15 s` for `escape`). Nothing can switch faster than
+   that. Avoidance gets most of a second because a swerve round the glass takes
+   about that long to complete, and a fish that reconsiders halfway through one
+   turns back into the wall.
 
 Together these are what stop the twitchy, indecisive look that a plain argmax gives.
-Test `brain.no-dithering` runs 10 simulated minutes and asserts the mean intention
-duration exceeds 2.5 s and that no intention is ever held for less than its dwell floor.
+The test `the fish does not dither between intentions` runs 150 simulated seconds
+and asserts that the mean intention lasts over 1.5 s, that anything cut shorter
+than 0.13 s was cut short by a *reflex* — an escape or an avoidance, which are
+allowed to pre-empt — and that fewer than 12 % of intentions end that way.
 
 ### 5.4 Behaviour routines
 

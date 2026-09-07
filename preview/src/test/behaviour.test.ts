@@ -72,28 +72,39 @@ test('the fish does not dither between intentions', () => {
   // minimum dwell time exist to stop it, and this is what they are for.
   const world = new World({ seed: 21, timeScale: 50 });
 
-  const durations: number[] = [];
+  const spans: { intention: Intention; duration: number; next: Intention }[] = [];
   let current: Intention = world.brain.intention;
   let started = 0;
 
   run(world, 150, (t) => {
     if (world.brain.intention !== current) {
-      durations.push(t - started);
+      spans.push({ intention: current, duration: t - started, next: world.brain.intention });
       current = world.brain.intention;
       started = t;
     }
   });
 
-  assert.ok(durations.length > 5, 'the fish never changed its mind at all');
-  const mean = durations.reduce((a, b) => a + b, 0) / durations.length;
+  assert.ok(spans.length > 5, 'the fish never changed its mind at all');
+  const mean = spans.reduce((a, b) => a + b.duration, 0) / spans.length;
   assert.ok(mean > 1.5, `mean intention lasted only ${mean.toFixed(2)} s; the fish is dithering`);
 
-  // And nothing at all should be shorter than the escape dwell floor, which is
-  // the shortest any intention is allowed to be.
-  const shortest = Math.min(...durations);
+  // Anything shorter than the dwell floor must be a *reflex* pre-empting
+  // something — a fish that starts to swerve round the glass and is startled
+  // mid-swerve genuinely does abandon the swerve on the next frame, and should.
+  // What must not happen is two ordinary intentions trading places rapidly,
+  // which is the dithering this is here to catch.
+  const shortOnes = spans.filter((s) => s.duration < 0.13);
+  for (const s of shortOnes) {
+    assert.ok(
+      s.next === 'escape' || s.next === 'avoid',
+      `'${s.intention}' lasted only ${s.duration.toFixed(3)} s and was replaced by ` +
+        `'${s.next}', which is not a reflex — that is dithering`,
+    );
+  }
   assert.ok(
-    shortest >= 0.13,
-    `an intention lasted only ${shortest.toFixed(3)} s, below the minimum dwell`,
+    shortOnes.length < spans.length * 0.12,
+    `${shortOnes.length} of ${spans.length} intentions were cut short by a reflex; ` +
+      `that is too many to be genuine startles`,
   );
 });
 

@@ -211,8 +211,6 @@ export const FINS = {
    * letting the fin trail and lag, which is the thing worth having.
    */
   dampingRatio: 0.45,
-  /** Constraint solver iterations per substep. */
-  solverIterations: 8,
   /** Fin substeps per fish substep. The fin is far stiffer than the body. */
   substeps: 4,
 } as const;
@@ -381,8 +379,13 @@ export const DRIVES = {
 
   fearTau: 26.0,
   fatigueTau: 90.0,
-  /** Fatigue accrues with the cube of speed — the cost of transport is steeply nonlinear. */
-  fatigueSpeedGain: 0.055,
+  /**
+   * Speed above which the fish is working anaerobically and starts to tire, in
+   * body lengths per second. Below it, it can swim indefinitely.
+   */
+  aerobicSpeedSL: 4.0,
+  /** Fatigue accrues with the cube of speed above that threshold. */
+  fatigueSpeedGain: 0.030,
   /** Flaring is hard work and self-limits after 20-40 s. */
   fatigueFlareGain: 4.0,
 
@@ -404,8 +407,17 @@ export const INTENTION = {
   minDwell: 0.6,
   /** Except escape, which must be able to fire immediately. */
   minDwellEscape: 0.15,
-  /** And avoidance, which is brief but must not flicker against escape. */
-  minDwellAvoid: 0.25,
+  /**
+   * Avoidance holds for half a second — long enough to actually complete the
+   * swerve.
+   *
+   * At a quarter of a second the fish broke off the moment the wall stopped
+   * being imminent, resumed whatever it had been doing, and headed straight back
+   * into the same wall. It bounced along the glass alternating between avoiding
+   * and not avoiding several times a second, which is dithering even though each
+   * individual decision was correct.
+   */
+  minDwellAvoid: 0.5,
   /** A predicted collision inside this many seconds pre-empts everything. */
   collisionLookahead: 0.25,
   /**

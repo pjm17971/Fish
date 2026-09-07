@@ -82,6 +82,22 @@ export interface MotorCommand {
   /** Left and right pectoral beat frequency, Hz. */
   pectoralLeft: number;
   pectoralRight: number;
+  /**
+   * Steady tilt of both pectoral fins, -1 (nose down) to +1 (nose up).
+   *
+   * The pectorals are the fish's elevators. Angled into the oncoming water they
+   * generate lift ahead of the centre of mass, which pitches the whole animal —
+   * and once the animal is pitched, its tail thrust has a vertical component and
+   * it can climb or dive.
+   *
+   * Without this the fish simply cannot change depth by swimming. Bending the
+   * body vertically is not enough on its own: a laterally compressed fish
+   * presents almost no planform area, so the lift from an angled *body* comes
+   * out at a fraction of a percent of its weight. A fish that needed to reach
+   * the surface for air stalled six millimetres below it and hung there, level,
+   * indefinitely.
+   */
+  pectoralPitch: number;
   /** Commanded change in swim-bladder volume, -1 to +1. */
   bladder: number;
   /** How far the mouth is open, 0 to 1. Drives the suction strike. */
@@ -126,6 +142,7 @@ export function createMotorCommand(): MotorCommand {
     pitchBend: 0,
     pectoralLeft: 0,
     pectoralRight: 0,
+    pectoralPitch: 0,
     bladder: 0,
     mouthOpen: 0,
     finSpread: 0.55,
@@ -509,11 +526,14 @@ export function pectoralPose(
   phase: number,
   side: number,
   spread: number,
+  pitchBias: number,
   out: { sweep: number; pitch: number; normal: Vec3; velocityDir: Vec3 },
 ): void {
   const { sweepMean, sweepAmp, pitchAmp, pitchPhase } = PECTORAL_CACHE;
   const sweep = sweepMean + sweepAmp * spread * Math.sin(phase);
-  const pitch = pitchAmp * spread * Math.sin(phase + pitchPhase);
+  // The steady tilt rides on top of the stroke's own feathering, so a fin can
+  // row and act as an elevator at the same time — which is what they do.
+  const pitch = pitchAmp * spread * Math.sin(phase + pitchPhase) + pitchBias * 0.55;
   out.sweep = sweep;
   out.pitch = pitch;
 

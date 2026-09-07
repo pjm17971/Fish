@@ -558,14 +558,18 @@ export class FishLocomotion {
         }
       }
 
-      if (freq <= 1e-4) {
+      // The fin still does something when it is not beating: held out at an
+      // angle in moving water it is a control surface, and that is how the fish
+      // pitches. Skipping it whenever the beat frequency was zero meant the fish
+      // had no elevators at all.
+      if (freq <= 1e-4 && Math.abs(cmd.pectoralPitch) < 1e-3) {
         if (s === 0) this.prevPecVnL = 0;
         else this.prevPecVnR = 0;
         continue;
       }
 
       const spread = 0.55 + 0.45 * cmd.finSpread;
-      pectoralPose(phase, side, spread, pecPose);
+      pectoralPose(phase, side, spread, cmd.pectoralPitch, pecPose);
 
       // Blade centre, half a span out from the attachment along the blade axis.
       this.body.pectoralAttach(side, scratch.tmp);

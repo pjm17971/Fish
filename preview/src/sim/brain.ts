@@ -170,6 +170,12 @@ const STRIKE_RANGE = 0.018;
  * where the reference point sits relative to the opening.
  */
 const SWALLOW_RANGE = 0.009;
+/**
+ * How close the snout's centreline has to come to the surface for the fish to
+ * have its mouth in the air. The top of the head is a few millimetres above the
+ * point this is measured from, so this is head depth, not slack.
+ */
+const SURFACE_REACH = 0.005;
 /** Peak inflow speed at the mouth during a strike, m/s. */
 const SUCTION_SPEED = 0.14;
 
@@ -235,6 +241,8 @@ export class FishBrain {
   private forageHeading = 0;
   private forageTimer = 0;
   private surfacePhase: 'approach' | 'gulp' | 'leave' = 'approach';
+  /** Exposed for diagnostics. */
+  get surfacePhaseDebug(): string { return this.surfacePhase; }
   private surfaceTimer = 0;
   private escapeTimer = 0;
   private escapeDirection = v3();
@@ -446,9 +454,16 @@ export class FishBrain {
     d.aggression = expApproach(d.aggression, 0, 1 / DRIVES.aggressionTau, dt * ts);
     this.aggressionRefractory = Math.max(0, this.aggressionRefractory - dt * ts);
 
-    // Fatigue climbs with the cube of speed: the cost of transport is steeply
-    // nonlinear, which is why a fish bursts briefly and then has to stop.
-    const burst = Math.max(0, speedSL - 2);
+    // Fatigue climbs with the cube of speed above the aerobic threshold: the
+    // cost of transport is steeply nonlinear, which is why a fish bursts briefly
+    // and then has to stop.
+    //
+    // The threshold is where the fish switches from red muscle to white — around
+    // four body lengths a second for a small fish. Setting it at two, which is
+    // an ordinary cruising speed, meant the fish was accruing fatigue whenever it
+    // moved at all: it saturated, `rest` won permanently, and the fish lay on the
+    // bottom and never surfaced for air again.
+    const burst = Math.max(0, speedSL - DRIVES.aerobicSpeedSL);
     const flaring = this.intention === 'flare' ? DRIVES.fatigueFlareGain : 0;
     d.fatigue = saturate(
       d.fatigue + (DRIVES.fatigueSpeedGain * burst * burst * burst + flaring * 0.01) * dt * ts,
@@ -571,6 +586,10 @@ export class FishBrain {
 
   private onIntentionChanged(from: Intention, to: Intention, loco: FishLocomotion): void {
     if (from === 'flare') this.aggressionRefractory = DRIVES.aggressionRefractory;
+    // Having just swerved away from a wall, do not resume a course that pointed
+    // straight into it. Without this the fish bounces along the glass, avoiding
+    // and un-avoiding several times a second.
+    if (from === 'avoid') this.pickPatrolTarget();
     switch (to) {
       case 'surface':
         this.surfacePhase = 'approach';
@@ -683,14 +702,31 @@ export class FishBrain {
         this.surfaceTimer += dt;
         switch (this.surfacePhase) {
           case 'approach': {
-            // Aim so the *snout* reaches the surface. The mouth is well forward
-            // of the centre of mass, and a fish that put its centre at the water
-            // line would have its head a long way out of the water.
+            // Aim so the *snout* reaches the surface, at a point *ahead* of the
+            // fish rather than directly above it.
+            //
+            // A target straight overhead is ill-conditioned: the heading error is
+            // the angle to something at zero horizontal distance, so it is
+            // essentially arbitrary and flips about. The fish then spends all its
+            // effort turning — and because it slows down to turn, it stalls a few
+            // millimetres short of the air it needs and hangs there indefinitely.
+            // Swimming up at a shallow angle is also simply what a fish does; it
+            // does not levitate.
             const lift = loco.position.y - this.mouth.y;
-            set(g.target, this.mouth.x, surfaceY + 0.003 + lift, this.mouth.z);
+            loco.forward(scratch.fwd);
+            const ahead = 0.045;
+            set(
+              g.target,
+              this.mouth.x + scratch.fwd.x * ahead,
+              surfaceY + 0.003 + lift,
+              this.mouth.z + scratch.fwd.z * ahead,
+            );
             g.speedSL = 1.4;
             g.urgency = 0.5;
-            if (this.mouth.y > surfaceY - 0.003) {
+            // The tolerance is the depth of the fish's own head. What actually
+            // breaks the surface is the top of the snout, a few millimetres above
+            // the centreline point this is measured from.
+            if (this.mouth.y > surfaceY - SURFACE_REACH) {
               this.surfacePhase = 'gulp';
               this.surfaceTimer = 0;
             }
@@ -698,14 +734,20 @@ export class FishBrain {
           }
           case 'gulp': {
             const lift = loco.position.y - this.mouth.y;
-            set(g.target, this.mouth.x, surfaceY + 0.004 + lift, this.mouth.z);
+            loco.forward(scratch.fwd);
+            set(
+              g.target,
+              this.mouth.x + scratch.fwd.x * 0.02,
+              surfaceY + 0.004 + lift,
+              this.mouth.z + scratch.fwd.z * 0.02,
+            );
             g.speedSL = 0.2;
             g.hover = true;
             g.mouthOpen = 0.8;
             // The breath only counts if the snout is genuinely at the surface.
             // Running it off a timer alone let the fish "gulp air" a centimetre
             // and a half under water whenever it got jostled on the way up.
-            if (this.surfaceTimer > 0.22 && this.mouth.y > surfaceY - 0.004) {
+            if (this.surfaceTimer > 0.22 && this.mouth.y > surfaceY - SURFACE_REACH * 1.4) {
               this.drives.airDebt = 0;
               this.gulpedThisTick = true;
               this.surfacePhase = 'leave';
@@ -963,6 +1005,10 @@ export class FishBrain {
     // fish so its own forward motion carries it up or down.
     cmd.bladder = clamp(pitchError * 2.2, -1, 1);
     cmd.pitchBend = clamp(pitchError * 1.6 * (0.6 + 0.4 * g.urgency) - 0.03 * pitchRate, -1, 1);
+    // The pectorals are the elevators, and they do most of the work: the body's
+    // own vertical bend is almost useless for climbing on a fish this laterally
+    // compressed.
+    cmd.pectoralPitch = clamp(pitchError * 2.4 - 0.20 * pitchRate, -1, 1);
 
     // Slow down to turn.
     //
@@ -992,8 +1038,10 @@ export class FishBrain {
       // driving instantly but cannot summon power instantly.
       const rate = speedError < 0 ? 9.0 : 3.5;
       cmd.frequency = clamp(cmd.frequency + rate * speedError * dt, 0, FISH.maxTailBeatHz);
-      cmd.pectoralLeft = expApproach(cmd.pectoralLeft, 0.3, 4, dt);
-      cmd.pectoralRight = expApproach(cmd.pectoralRight, 0.3, 4, dt);
+      // Keep a slow beat going even while the tail is driving: the fins have to
+      // stay extended to work as elevators.
+      cmd.pectoralLeft = expApproach(cmd.pectoralLeft, 0.5, 4, dt);
+      cmd.pectoralRight = expApproach(cmd.pectoralRight, 0.5, 4, dt);
       // Amplitude is nearly constant in real steady swimming — fish change speed
       // by changing frequency — and only opens up in a burst.
       const burst = this.intention === 'escape';
