@@ -109,7 +109,8 @@ const toggle = document.getElementById('toggle') as HTMLButtonElement;
 function setHud(on: boolean): void {
   showHud = on;
   hud.style.display = on ? '' : 'none';
-  toggle.textContent = on ? 'hide readout' : 'show readout';
+  help.style.display = on ? '' : 'none';
+  toggle.textContent = on ? 'hide panels' : 'show panels';
   toggle.setAttribute('aria-pressed', String(on));
 }
 toggle.addEventListener('click', (e) => {
