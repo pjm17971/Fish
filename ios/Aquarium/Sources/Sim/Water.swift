@@ -31,8 +31,18 @@ final class WaterSurface {
     /// Linear acceleration of the tank in world space, gravity already removed.
     private var accelX: Double = 0
     private var accelZ: Double = 0
+    /// Simulated time advanced per substep, for the continuous outlet forcing.
+    private var substepTime: Double = 0
+    /// Cells under the filter outlet, with their Gaussian weights.
+    private var outletCells: [Int] = []
+    private var outletWeights: [Float] = []
 
-    init(nx: Int = Water.nx, nz: Int = Water.nz) throws {
+    /// Whether the filter outlet runs. On in the tank; off for checks against
+    /// the analytic wave equation.
+    private let outlet: Bool
+
+    init(nx: Int = Water.nx, nz: Int = Water.nz, outlet: Bool = true) throws {
+        self.outlet = outlet
         self.nx = nx
         self.nz = nz
         self.dx = Tank.width / Double(nx - 1)
@@ -44,6 +54,19 @@ final class WaterSurface {
         self.lapV = [Float](repeating: 0, count: n)
         self.normals = [Float](repeating: 0, count: n * 3)
         rebuildNormals()
+
+        // The filter outlet's footprint on the grid, computed once.
+        let r = Water.outletRadius
+        for j in 0..<nz {
+            let wz = worldZ(j) - Water.vortexCentreZ
+            for i in 0..<nx {
+                let wx = worldX(i) - Water.vortexCentreX
+                let d2 = wx * wx + wz * wz
+                if d2 > r * r { continue }
+                outletCells.append(index(i, j))
+                outletWeights.append(Float(exp(-3 * (d2 / (r * r)))))
+            }
+        }
 
         // Two explicit-stability conditions have to hold, and checking only the
         // obvious one is a trap: the surface then behaves perfectly well in gentle
@@ -183,6 +206,21 @@ final class WaterSurface {
     }
 
     private func substep(dt: Double, applyForcing: Bool) {
+        substepTime += dt
+
+        // The filter outlet. A continuous source, applied every substep rather
+        // than as a per-frame impulse so the ripple height does not depend on
+        // the frame rate. Two slow modulations keep it from being a pure tone.
+        if outlet {
+            let t = substepTime
+            let flutter = 0.7 + 0.3 * sin(2 * Double.pi * 0.23 * t + 1.0)
+            let hz = Water.outletRippleHz * (1 + 0.08 * sin(2 * Double.pi * 0.11 * t))
+            let a = Float(Water.outletRippleAccel * flutter * sin(2 * Double.pi * hz * t) * dt)
+            for n in 0..<outletCells.count {
+                vel[outletCells[n]] += a * outletWeights[n]
+            }
+        }
+
         let c2 = Float(Water.waveSpeed * Water.waveSpeed)
         let invDx2 = Float(1 / (dx * dx))
         let invDz2 = Float(1 / (dz * dz))

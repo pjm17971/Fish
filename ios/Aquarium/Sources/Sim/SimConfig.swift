@@ -87,7 +87,14 @@ enum Fish {
     static let ampA2: Double = 1.22
 
     /// Peak sideways offset of the tail beat at full steering deflection, metres.
-    static let bendScale: Double = 0.0038
+    /// How much harder the tail beats to one side than the other in a turn, as
+    /// a fraction of the beat amplitude. This is what turns the fish at a
+    /// standstill: a beat that is further and faster to one side puts a net
+    /// sideways impulse into the water at the tail. The earlier static one-sided
+    /// shift of a symmetric wave had equal speeds both ways and netted nothing
+    /// at rest, so the fish could only turn as a rudder does, with water
+    /// flowing past, and could not turn round in the tank.
+    static let bendAsymmetry: Double = 0.8
     /// Static camber of the whole body into a turn, at the tail tip, metres.
     static let bendCamber: Double = 0.010
     /// How much further the fish can bend in a reflex. A C-start is an extreme
@@ -106,8 +113,16 @@ enum Fish {
 
     /// How far the centre of volume sits above the centre of mass — the fish's
     /// righting moment, and why a healthy fish rolls upright by itself.
+    /// Viscous rotational damping, as a time constant. Quadratic damping alone
+    /// decays as 1/t and a kicked fish coasted in yaw for seconds; a small fish
+    /// in water stops within a fraction of a second.
+    static let rotationalViscousTau: Double = 2.5
     static let centreOfVolumeOffsetY: Double = 0.0014
-    static let bladderRange: (Double, Double) = (0.85, 1.15)
+    /// Small, and deliberately so. At ±15% the bladder was the strongest
+    /// vertical force the fish had and it rose and sank on it with the tail
+    /// switched off. A real bladder is a trim tank, not an elevator: ±3% is
+    /// enough to trim and not enough to fly on.
+    static let bladderRange: (Double, Double) = (0.97, 1.03)
     static let bladderSlewRate: Double = 0.04
 
     /// Physics substep. 250 Hz — fast enough that a 9 Hz tail beat is well resolved.
@@ -119,12 +134,14 @@ enum Fish {
 enum Pectoral {
     static let sweepMean: Double = 0.35
     static let sweepAmp: Double = 0.55
-    static let pitchAmp: Double = 0.62
-    /// Phase lead of pitch over sweep.
-    ///
-    /// This is the whole trick: with zero offset a rowing fin does equal work on
-    /// the power and recovery strokes and produces no net thrust at all.
-    static let pitchPhase: Double = 1.9
+    /// Feathering: how far the blade turns edge-on during the recovery stroke.
+    /// The profile is (1 - cos(phase))/2 — flat through the power stroke, edge-on
+    /// through the recovery. A sinusoid with a phase lead feathered both strokes
+    /// equally and produced no thrust, only a large vertical force per fin.
+    static let pitchAmp: Double = 1.45
+    /// Sweep angle the fin folds back to when it is not rowing. An outstretched
+    /// paddle is a brake; a folded one is edge-on and, tilted, an elevator.
+    static let sweepFolded: Double = 1.25
     static let area: Double = 0.011 * 0.007
     static let span: Double = 0.011
     static let attachAt: Double = 0.30
@@ -221,6 +238,14 @@ enum Water {
     static let curlScale: Double = 0.09
     static let curlTimeHz: Double = 0.15
     static let curlAmplitude: Double = 0.004
+    /// The filter outlet, where the return stream meets the surface and keeps
+    /// a patch of millimetre ripples going all the time. Without a source the
+    /// surface settles to a perfect plane and the tank looks dry: the ripples
+    /// carry the caustics, the wobble in everything seen through the surface,
+    /// and the glints.
+    static let outletRadius: Double = 0.014
+    static let outletRippleHz: Double = 2.6
+    static let outletRippleAccel: Double = 2.0
 }
 
 // MARK: - Food
@@ -297,6 +322,10 @@ enum Drives {
     /// moved at all: fatigue saturated, `rest` won permanently, and the fish lay
     /// on the bottom and never surfaced for air again.
     static let aerobicSpeedSL: Double = 4.0
+    /// The same threshold as a tail-beat frequency, which is what the fatigue
+    /// model uses: from the speed-against-beat fit, four body lengths a second
+    /// is about 4.3 beats a second.
+    static let aerobicBeatHz: Double = 4.3
     /// Fatigue accrues with the cube of the speed above that threshold: cost of
     /// transport is steeply nonlinear, which is why a fish bursts briefly and
     /// then has to stop.

@@ -354,10 +354,17 @@ export function buildTankMesh(): { vertices: Float32Array; indices: Uint16Array 
     }
   }
 
-  // Back wall and the two sides, seen from inside.
-  quad(v3(x0, TANK.floorY, z0), v3(x1, TANK.floorY, z0), v3(x1, yTop, z0), v3(x0, yTop, z0), v3(0, 0, 1), 1);
-  quad(v3(x0, TANK.floorY, z1), v3(x0, TANK.floorY, z0), v3(x0, yTop, z0), v3(x0, yTop, z1), v3(1, 0, 0), 1);
-  quad(v3(x1, TANK.floorY, z0), v3(x1, TANK.floorY, z1), v3(x1, yTop, z1), v3(x1, yTop, z0), v3(-1, 0, 0), 1);
+  // Back wall and the two sides, seen from inside. Each is split at the
+  // waterline: the part under water is drawn where refraction makes it appear
+  // and the part above is not, and the kink between them at the waterline is
+  // real — look at the side of any tank through its front.
+  const yW = TANK.waterY;
+  quad(v3(x0, TANK.floorY, z0), v3(x1, TANK.floorY, z0), v3(x1, yW, z0), v3(x0, yW, z0), v3(0, 0, 1), 1);
+  quad(v3(x0, yW, z0), v3(x1, yW, z0), v3(x1, yTop, z0), v3(x0, yTop, z0), v3(0, 0, 1), 1);
+  quad(v3(x0, TANK.floorY, z1), v3(x0, TANK.floorY, z0), v3(x0, yW, z0), v3(x0, yW, z1), v3(1, 0, 0), 1);
+  quad(v3(x0, yW, z1), v3(x0, yW, z0), v3(x0, yTop, z0), v3(x0, yTop, z1), v3(1, 0, 0), 1);
+  quad(v3(x1, TANK.floorY, z0), v3(x1, TANK.floorY, z1), v3(x1, yW, z1), v3(x1, yW, z0), v3(-1, 0, 0), 1);
+  quad(v3(x1, yW, z0), v3(x1, yW, z1), v3(x1, yTop, z1), v3(x1, yTop, z0), v3(-1, 0, 0), 1);
 
   return { vertices: new Float32Array(verts), indices: new Uint16Array(idx) };
 }

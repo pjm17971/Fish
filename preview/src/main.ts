@@ -24,9 +24,13 @@ const renderer = new Renderer(canvas, world);
 
 const camera: CameraState = {
   yaw: 0,
-  pitch: 0.12,
+  // Eye level with the middle of the tank, which puts it just below the
+  // waterline: the view a person has of a tank on a desk, and the one in
+  // which the underside of the surface is a mirror with the fish in it. Drag
+  // upwards to look down onto the surface instead.
+  pitch: -0.02,
   distance: 0.42,
-  target: v3(0, TANK.floorY + 0.05, -TANK.depth * 0.5),
+  target: v3(0, TANK.floorY + 0.06, -TANK.depth * 0.5),
 };
 
 // ---------------------------------------------------------------------------

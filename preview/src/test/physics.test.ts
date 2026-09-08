@@ -29,7 +29,7 @@ test('the tank sloshes at the period a tank this size really has', () => {
   // used is sqrt(g*h) rather than a number picked to look right.
   const expected = (2 * TANK.width) / Math.sqrt(GRAVITY * WATER_DEPTH);
 
-  const water = new WaterSurface();
+  const water = new WaterSurface(WATER.nx, WATER.nz, false);
   // Tip the tank briefly to set the fundamental mode going, then let it ring.
   water.setTankAcceleration(1.2, 0);
   for (let i = 0; i < 200; i++) water.step(1 / 240);
@@ -65,7 +65,7 @@ test('the water surface stays bounded under continuous shaking', () => {
   // An explicit wave equation is only conditionally stable, so this is really a
   // check that the CFL condition holds for the grid actually built rather than
   // for the one the spec describes.
-  const water = new WaterSurface();
+  const water = new WaterSurface(WATER.nx, WATER.nz, false);
   const rng = new Rng(7);
   for (let i = 0; i < 3000; i++) {
     water.setTankAcceleration(rng.sym(4), rng.sym(4));
@@ -81,7 +81,7 @@ test('the water surface stays bounded under continuous shaking', () => {
 });
 
 test('still water stays still', () => {
-  const water = new WaterSurface();
+  const water = new WaterSurface(WATER.nx, WATER.nz, false);
   for (let i = 0; i < 2000; i++) water.step(1 / 120);
   let peak = 0;
   for (let i = 0; i < water.height.length; i++) peak = Math.max(peak, Math.abs(water.height[i]));
@@ -89,7 +89,7 @@ test('still water stays still', () => {
 });
 
 test('a disturbance dies away rather than ringing forever', () => {
-  const water = new WaterSurface();
+  const water = new WaterSurface(WATER.nx, WATER.nz, false);
   water.disturb(0, -0.12, 0.4, 0.01);
   for (let i = 0; i < 120; i++) water.step(1 / 120);
   let early = 0;
@@ -100,6 +100,28 @@ test('a disturbance dies away rather than ringing forever', () => {
   for (let i = 0; i < water.height.length; i++) late = Math.max(late, Math.abs(water.height[i]));
 
   assert.ok(late < early * 0.2, `ripples barely decayed: ${early.toExponential(2)} -> ${late.toExponential(2)}`);
+});
+
+test('the filter outlet keeps a millimetre of ripple going, and no more', () => {
+  // The tank is never still: the filter's return stream keeps a patch of small
+  // ripples going at the outlet, and those ripples are most of what makes the
+  // water visible. The source is continuous, so two things have to be true of
+  // it: the ripples must settle at about a millimetre rather than growing, and
+  // nothing may go non-finite over a long run with the source on.
+  const water = new WaterSurface();
+  let peak = 0;
+  for (let i = 0; i < 40 * 60; i++) {
+    water.step(1 / 60);
+    if (i > 5 * 60) {
+      for (let k = 0; k < water.height.length; k++) {
+        const h = Math.abs(water.height[k]);
+        assert.ok(Number.isFinite(h), 'the surface went non-finite with the outlet running');
+        if (h > peak) peak = h;
+      }
+    }
+  }
+  assert.ok(peak > 0.0002, `the outlet barely moved the surface: ${(peak * 1000).toFixed(2)} mm peak`);
+  assert.ok(peak < 0.003, `the outlet ripple grew to ${(peak * 1000).toFixed(2)} mm; a filter return makes about one`);
 });
 
 test('the bulk flow field is divergence free', () => {
@@ -155,7 +177,7 @@ test('a waterlogged pellet sinks at its analytic terminal speed', () => {
   const expected = analyticTerminalSinkSpeed();
   assert.ok(expected > 0.01 && expected < 0.2, `analytic terminal speed looks wrong: ${expected}`);
 
-  const water = new WaterSurface();
+  const water = new WaterSurface(WATER.nx, WATER.nz, false);
   const flow = new BulkFlow(1);
   const food = new FoodSystem(42);
   food.drop(0, -0.12);
@@ -191,7 +213,7 @@ test('a waterlogged pellet sinks at its analytic terminal speed', () => {
 });
 
 test('a fresh pellet floats and a soaked one sinks', () => {
-  const water = new WaterSurface();
+  const water = new WaterSurface(WATER.nx, WATER.nz, false);
   const flow = new BulkFlow(1);
   const food = new FoodSystem(7);
   food.drop(0, -0.12);
@@ -320,7 +342,7 @@ test('the water grid respects its own CFL limit', () => {
   // Constructing the surface throws if the timestep is too large for the grid,
   // so this is really a check that the shipped configuration is inside the
   // stability region rather than close to its edge.
-  const water = new WaterSurface();
+  const water = new WaterSurface(WATER.nx, WATER.nz, false);
   const limit = Math.min(water.dx, water.dz) / (WATER.waveSpeed * Math.SQRT2);
   assert.ok(WATER.dt < limit * 0.9, `water timestep ${WATER.dt} is within 10% of the CFL limit ${limit.toFixed(5)}`);
 });

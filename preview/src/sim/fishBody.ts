@@ -273,9 +273,16 @@ export class FishBody {
       // trailing edge the biggest-amplitude part of the animal.
       const s = arc / L;
       const env = amplitudeEnvelope(s) * this.actualAmplitude;
+      const theta = k * arc - this.wavePhase;
+      const wave = Math.sin(theta);
+      const steer = this.actualBend * (1 + FISH.bendReflexGain * this.actualAgility);
+      // Three things at once in a turn: the ordinary wave; the same wave beaten
+      // harder to one side (sin^2 is one-signed and largest at the extremes, so
+      // it is an amplitude asymmetry rather than a shift — see bendAsymmetry);
+      // and a camber of the whole body into the turn, which is the rudder.
       const h =
-        env * Math.sin(k * arc - this.wavePhase) +
-        this.actualBend * bendShape(s) * (1 + FISH.bendReflexGain * this.actualAgility);
+        env * wave +
+        steer * (FISH.bendAsymmetry * env * wave * wave + bendShape(s));
       this.denseX[j] = h;
       // Vertical bend. Gentler than the lateral one — a fish is far stiffer in
       // that plane, which is why it turns much more readily than it climbs.
@@ -486,7 +493,12 @@ export class FishBody {
     }
     const seg = this.segments[idx];
     copy(out, seg.pos);
-    return addScaled(out, seg.normal, side * segs[idx].width * 0.5);
+    // The segment normal points towards -x on a straight body, and the blade
+    // extends towards +x for side = +1, so the sign here is what puts the fin's
+    // root on the same side of the body as its blade. With it the other way
+    // each blade crossed through the body to the far side, its lever arm about
+    // the yaw axis all but vanished, and rowing one fin could not turn the fish.
+    return addScaled(out, seg.normal, -side * segs[idx].width * 0.5);
   }
 
   get phase(): number {
@@ -519,7 +531,7 @@ const PECTORAL_CACHE = {
   sweepMean: PECTORAL.sweepMean,
   sweepAmp: PECTORAL.sweepAmp,
   pitchAmp: PECTORAL.pitchAmp,
-  pitchPhase: PECTORAL.pitchPhase,
+  sweepFolded: PECTORAL.sweepFolded,
 };
 
 export function pectoralPose(
@@ -527,27 +539,52 @@ export function pectoralPose(
   side: number,
   spread: number,
   pitchBias: number,
-  out: { sweep: number; pitch: number; normal: Vec3; velocityDir: Vec3 },
+  rowing: number,
+  out: { sweep: number; pitch: number; dSweepDPhase: number; normal: Vec3; velocityDir: Vec3 },
 ): void {
-  const { sweepMean, sweepAmp, pitchAmp, pitchPhase } = PECTORAL_CACHE;
-  const sweep = sweepMean + sweepAmp * spread * Math.sin(phase);
-  // The steady tilt rides on top of the stroke's own feathering, so a fin can
-  // row and act as an elevator at the same time — which is what they do.
-  const pitch = pitchAmp * spread * Math.sin(phase + pitchPhase) + pitchBias * 0.55;
+  const { sweepMean, sweepAmp, pitchAmp, sweepFolded } = PECTORAL_CACHE;
+  // Folded back along the flank when still; out and rowing when beating. The
+  // sweep angle increasing means the fin moving backwards, which is the power
+  // stroke.
+  const fold = 1 - rowing;
+  const sweep = sweepFolded * fold + rowing * (sweepMean + sweepAmp * spread * Math.sin(phase));
+  // Feathering: flat through the power stroke (phase near 0), edge-on through
+  // the recovery (phase near pi). The steady tilt rides on top of it, so a fin
+  // can row and act as an elevator at the same time — which is what they do.
+  const feather = rowing * pitchAmp * 0.5 * (1 - Math.cos(phase));
+  // Positive bias is nose-up: it tilts the blade so forward flow lifts it.
+  // Sign by measurement.
+  const pitch = feather - pitchBias * 0.55;
   out.sweep = sweep;
   out.pitch = pitch;
+  out.dSweepDPhase = rowing * sweepAmp * spread * Math.cos(phase);
 
   // Fin blade normal in the body frame. The blade lies in a plane that sweeps
   // about the dorsal axis and feathers about its own span.
+  //
+  // The span runs outwards from the body at the sweep angle, (side*cs, 0, -ss).
+  // The blade is a paddle standing on that span: its plane contains the span
+  // and the vertical, so its normal is perpendicular to both — span x up — and
+  // feathering tilts that normal about the span. Earlier this was set *along*
+  // the span, which made the paddle move edge-on through the water on every
+  // stroke. It then produced no force at all: no thrust from rowing, no yaw
+  // from rowing one side, and no lift when held as an elevator. The whole slow
+  // swimming mode ran on nothing, and the test that checks the fin's feathering
+  // phase passed because zero is very reliably equal to zero.
   const cs = Math.cos(sweep);
   const ss = Math.sin(sweep);
   const cp = Math.cos(pitch);
   const sp = Math.sin(pitch);
-  set(out.normal, side * cs * cp, sp, -ss * cp);
+  // The tilt about the span mirrors with the side: a feather that lifts the
+  // leading edge on one fin must lift it on the other, and the sense of a
+  // rotation about a mirrored axis is itself mirrored. Without the `side` on
+  // the vertical term the two fins' vertical forces had opposite signs — they
+  // cancelled with both fins rowing, and every turn became a climb.
+  set(out.normal, ss * cp, side * sp, side * cs * cp);
   normalize(out.normal, out.normal);
 
   // Direction the blade centre is travelling: derivative of the sweep.
-  const dSweep = sweepAmp * spread * Math.cos(phase);
+  const dSweep = out.dSweepDPhase;
   set(out.velocityDir, side * -ss * dSweep, 0, -cs * dSweep);
   const l = len(out.velocityDir);
   if (l > 1e-9) scale(out.velocityDir, out.velocityDir, 1 / l);

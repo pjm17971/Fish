@@ -423,8 +423,8 @@ export function amplitudeEnvelope(s: number): number {
  * a peak offset of under four millimetres.
  */
 export function bendShape(s: number): number {
-  // Two parts, because a turning fish does two things at once: it beats its tail
-  // asymmetrically (which rides the wave, so it scales with the beat amplitude)
-  // and it cambers its whole body into the turn (which does not).
-  return amplitudeEnvelope(s) * FISH.bendScale + FISH.bendCamber * Math.pow(s, 1.6);
+  // The camber of the whole body into a turn, zero at the head so the fish
+  // pivots about its front third. The asymmetric beat is handled in the body
+  // shape itself, because it rides the wave; this is the part that does not.
+  return FISH.bendCamber * Math.pow(s, 1.6);
 }

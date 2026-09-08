@@ -22,7 +22,8 @@ import assert from 'node:assert/strict';
 import { buildMorphology } from '../sim/morphology.js';
 import { FishBody, createMotorCommand } from '../sim/fishBody.js';
 import { createLocomotion } from '../sim/locomotion.js';
-import { FISH, PECTORAL } from '../sim/config.js';
+import { v3 } from '../sim/math.js';
+import { FISH } from '../sim/config.js';
 
 interface SwimResult {
   /** Mean forward speed once settled, m/s. */
@@ -187,40 +188,61 @@ test('a fish that stops beating coasts to a halt and never speeds up', () => {
   }
 });
 
-test('a rowing fin with no feathering produces no net thrust', () => {
-  // This is the mechanism that makes pectoral rowing work, isolated. A fin that
-  // sweeps back and forth while staying broadside does exactly as much work on
-  // the recovery stroke as on the power stroke, so the two cancel. Real fins
-  // feather — they turn edge-on to slip back — and the phase offset between the
-  // sweep and that feathering is the entire trick.
+test('rowing the pectorals drives the fish forwards without lifting it', () => {
+  // The slow-swimming mode, isolated, in the real solver.
   //
-  // Rather than reach into the solver, integrate the blade-element force over a
-  // full stroke cycle analytically at the two phase offsets.
-  const netThrust = (pitchPhase: number): number => {
-    let total = 0;
-    const N = 2000;
-    for (let i = 0; i < N; i++) {
-      const phase = (i / N) * 2 * Math.PI;
-      const sweepRate = PECTORAL.sweepAmp * Math.cos(phase);
-      const pitch = PECTORAL.pitchAmp * Math.sin(phase + pitchPhase);
-      // Force normal to the blade goes as the square of the normal velocity;
-      // the component of that along the body axis is what propels the fish.
-      const vNormal = sweepRate * Math.cos(pitch);
-      const along = Math.sin(pitch);
-      total += -Math.abs(vNormal) * vNormal * along;
+  // For a long time this mode produced nothing at all: the blade normal was set
+  // along the fin's span, so the paddle moved edge-on and every stroke was
+  // free. A test of the feathering *phase* passed throughout, because it
+  // integrated its own copy of the blade model rather than asking the solver,
+  // and zero is very reliably equal to zero. So this asks the solver.
+  //
+  // The signs matter as much as the magnitudes: the steering law's choice of
+  // which fin to row for which turn is set from what is measured here.
+  const row = (left: number, right: number) => {
+    const morph = buildMorphology();
+    const body = new FishBody(morph);
+    const loc = createLocomotion(morph, body);
+    loc.bounds = null;
+    const cmd = createMotorCommand();
+    cmd.pectoralLeft = left;
+    cmd.pectoralRight = right;
+    cmd.finSpread = 0.6;
+    const p0 = { ...loc.position };
+    let yaw0: number | null = null;
+    let yaw = 0;
+    for (let i = 0; i < Math.round(5 / FISH.dt); i++) {
+      loc.step(cmd, null, null, FISH.dt);
+      const f = loc.forward(v3());
+      yaw = Math.atan2(f.x, f.z);
+      if (yaw0 === null) yaw0 = yaw;
     }
-    return total / N;
+    let turned = yaw - (yaw0 ?? 0);
+    turned = Math.atan2(Math.sin(turned), Math.cos(turned));
+    return {
+      forwardSL: loc.forwardSpeedSL,
+      turnedDeg: (turned * 180) / Math.PI,
+      roseMm: (loc.position.y - p0.y) * 1000,
+    };
   };
 
-  const withFeathering = netThrust(PECTORAL.pitchPhase);
-  const withoutFeathering = netThrust(0);
-
+  const both = row(4, 4);
   assert.ok(
-    Math.abs(withoutFeathering) < 0.01 * Math.abs(withFeathering),
-    `an unfeathered rowing stroke produced ${withoutFeathering.toExponential(2)} of net thrust, ` +
-      `against ${withFeathering.toExponential(2)} for the feathered one — it should be nil`,
+    both.forwardSL > 0.15,
+    `rowing both pectorals at 4 Hz gave only ${both.forwardSL.toFixed(2)} SL/s forwards`,
   );
-  assert.ok(Math.abs(withFeathering) > 1e-3, 'the feathered stroke should produce real thrust');
+  assert.ok(Math.abs(both.turnedDeg) < 15, `symmetric rowing turned the fish ${both.turnedDeg.toFixed(0)} degrees`);
+  assert.ok(Math.abs(both.roseMm) < 25, `symmetric rowing moved the fish ${both.roseMm.toFixed(0)} mm vertically`);
+
+  // One fin alone. Its torque on the body is real and correctly signed (about
+  // 1.5e-7 N.m, measured), but the water the fish's flanks and fins must shove
+  // sideways to rotate gives it thirty-five times its own yaw inertia, and a
+  // single pectoral cannot turn that: a quarter of a degree a second. That is
+  // why the fish pivots with a tail scull and not with its pectorals. What a
+  // single fin must still do is push, and must not do is lift.
+  const leftOnly = row(4, 0);
+  assert.ok(leftOnly.forwardSL > 0.1, `one rowing fin gave only ${leftOnly.forwardSL.toFixed(2)} SL/s`);
+  assert.ok(Math.abs(leftOnly.roseMm) < 40, `one rowing fin lifted the fish ${leftOnly.roseMm.toFixed(0)} mm`);
 });
 
 test('the fish cannot move itself by wriggling in still water', () => {

@@ -91,23 +91,22 @@ export const FISH = {
   /** Amplitude envelope A(s)/A_tip = a0 + a1*s + a2*s^2. */
   ampEnvelope: { a0: 0.08, a1: -0.30, a2: 1.22 },
   /**
-   * Turning bend: bendScale * s^bendExp, a steady one-sided curvature added to
-   * the travelling wave.
+   * How much harder the tail beats to one side than the other in a turn, as a
+   * fraction of the beat amplitude. At 0.8 the tail sweeps to 1.8 times its
+   * normal excursion on the turning side and barely crosses the centreline on
+   * the other.
    *
-   * This is the amplitude for *steering*. At 0.010 a full deflection swung the
-   * caudal fin's tip nearly forty millimetres off the centreline — an
-   * escape-grade C-shape, being used for ordinary course corrections several
-   * times a second. Because the reactive force follows the rate of body
-   * deformation and the tail carries grams of entrained water, each of those
-   * flips produced fifteen to twenty times the fish's weight in force and threw
-   * it across the tank at twelve body lengths a second.
+   * This is the mechanism that turns the fish at a standstill. A beat that is
+   * further and faster to one side puts a net sideways impulse into the water
+   * at the tail — drag goes as the square of speed, so the fast half-stroke
+   * wins — and the reaction yaws the fish, moving or not. The first version
+   * was a static one-sided *shift* of a symmetric wave, which has equal speeds
+   * both ways and nets nothing at rest; the fish could then only turn as a
+   * rudder turns, with water flowing past, and its turning radius at any
+   * speed was wider than the tank. Braking to turn tighter switched the turn
+   * off. It could not turn round.
    */
-  /**
-   * Peak sideways offset of the tail beat at full steering deflection, in
-   * metres. About 80% of the beat's own amplitude, which makes a strongly
-   * one-sided sweep without the tail ever crossing the centreline.
-   */
-  bendScale: 0.0038,
+  bendAsymmetry: 0.8,
   /** Static camber of the whole body into a turn, at the tail tip, in metres. */
   bendCamber: 0.010,
   /**
@@ -128,10 +127,37 @@ export const FISH = {
    */
   addedMassSurgeCoefficient: 0.15,
 
+  /**
+   * Viscous rotational damping, as a time constant in seconds.
+   *
+   * The cross-flow drag on a rotating body is quadratic in the rate, and
+   * quadratic damping alone decays as 1/t: a fish kicked into a spin at one
+   * radian a second was still turning at a tenth of that five seconds later.
+   * A five-centimetre fish in water does not coast in yaw; at these rates the
+   * boundary layer's own friction, linear in the rate, is what stops it. This
+   * is that term, sized so a free spin dies away in about four tenths of a
+   * second.
+   */
+  rotationalViscousTau: 2.5,
   /** How far the centre of volume sits above the centre of mass — the righting moment. */
   centreOfVolumeOffsetY: 0.0014,
-  /** Swim bladder volume range, as a multiple of the neutral-buoyancy volume. */
-  bladderRange: [0.85, 1.15] as const,
+  /**
+   * Swim bladder volume range, as a multiple of the neutral-buoyancy volume.
+   *
+   * Small, and deliberately so. The first value, ±15%, treated the bladder as
+   * a control surface: the brain commanded it from the pitch error, and at ±15%
+   * of body weight it was by far the strongest vertical force the fish had.
+   * The result was a fish that rose and sank on its bladder alone — the tail
+   * never beat, because rising and sinking counted as "already moving" — and
+   * bobbed up and down on the spot. Ninety per cent of the distance it covered
+   * was vertical.
+   *
+   * A real bladder is a trim tank, not an elevator: it changes over tens of
+   * seconds to hold neutral buoyancy at the depth the fish is spending its time
+   * at, and the fish climbs and dives by swimming with its body pitched and its
+   * pectorals angled. ±3% is enough to trim and not enough to fly on.
+   */
+  bladderRange: [0.97, 1.03] as const,
   /** How fast the bladder can change, per second of its full range. */
   bladderSlewRate: 0.04,
 
@@ -146,14 +172,35 @@ export const PECTORAL = {
   sweepMean: 0.35,
   /** Sweep amplitude. */
   sweepAmp: 0.55,
-  /** Feathering amplitude. */
-  pitchAmp: 0.62,
   /**
-   * Phase lead of pitch over sweep. This is the whole trick: with zero offset a
-   * rowing fin does equal work on the power and recovery strokes and produces no
-   * net thrust. Test `pectoral.phase` asserts exactly that.
+   * Feathering: how far the blade turns edge-on during the recovery stroke, in
+   * radians. This is the whole trick of rowing. The blade is held flat through
+   * the power stroke and turned nearly edge-on for the recovery, so the two
+   * half-strokes do very unequal work and the difference is thrust.
+   *
+   * The profile is (1 - cos(phase))/2 — zero through the power stroke, full
+   * at mid-recovery — not a sinusoid with a phase lead, which was the first
+   * attempt. A sinusoid feathers *both* strokes equally and only changes the
+   * sign of the tilt, so the drag was symmetric and the net thrust was zero;
+   * what it did produce was a large vertical force of opposite sign on the
+   * two fins, which happened to cancel with both fins rowing and sent the fish
+   * through the surface with one.
+   *
+   * 1.45 rad is 83 degrees: nearly edge-on. The feather is one-signed — the
+   * leading edge lifts — so whatever force the recovery stroke does make has a
+   * vertical component, and it falls with the square of the cosine of this
+   * angle. At 75 degrees the fish sank at nine millimetres a second while
+   * rowing; at 83 that is four times smaller.
    */
-  pitchPhase: 1.9,
+  pitchAmp: 1.45,
+  /**
+   * Sweep angle the fin folds back to when it is not rowing, from the body
+   * axis. A cruising betta lays its pectorals nearly flat along its flanks: an
+   * outstretched paddle is broadside to the flow and is a brake, a folded one
+   * is edge-on and, tilted, is an elevator. The blend from folded to rowing
+   * follows the beat frequency.
+   */
+  sweepFolded: 1.25,
   area: 0.011 * 0.007,
   span: 0.011,
   /** Where the pectorals attach along the body. */
@@ -281,6 +328,25 @@ export const WATER = {
   vortexCentre: { x: 0.13, z: -0.20 },
   vortexCoreRadius: 0.06,
   vortexPeakSpeed: 0.012,
+  /**
+   * The filter outlet, where the return stream meets the surface.
+   *
+   * A tank with a filter running is never still: the return flow breaks the
+   * surface and keeps a patch of small ripples going all the time, and those
+   * ripples are most of what makes the water *visible* — they carry the
+   * caustics on the sand, the wobble in everything seen through the surface,
+   * and the glints. Without a source the height field settles to a perfect
+   * plane within a few seconds of the last disturbance and the tank looks dry.
+   *
+   * Modelled as a small oscillating push on the surface velocity over a
+   * Gaussian patch at the outlet. The amplitude is set to give ripples of
+   * about a millimetre, which is what a gentle filter return produces; the
+   * frequency and strength flutter slowly, because a real stream does not hum
+   * a pure note.
+   */
+  outletRadius: 0.014,
+  outletRippleHz: 2.6,
+  outletRippleAccel: 2.0,
   /** Bulk flow: curl-noise. */
   curlScale: 0.09,
   curlTimeHz: 0.15,
@@ -384,7 +450,15 @@ export const DRIVES = {
    * body lengths per second. Below it, it can swim indefinitely.
    */
   aerobicSpeedSL: 4.0,
-  /** Fatigue accrues with the cube of speed above that threshold. */
+  /**
+   * The same threshold as a tail-beat frequency, which is what the fatigue
+   * model actually uses: from the linear fit of speed against beat frequency
+   * for this fish (see probe-strouhal), four body lengths a second is about
+   * 4.3 beats a second. Measured from the muscles rather than from the speed,
+   * being bounced off the glass no longer counts as a sprint.
+   */
+  aerobicBeatHz: 4.3,
+  /** Fatigue accrues with the cube of the beat frequency above that threshold. */
   fatigueSpeedGain: 0.030,
   /** Flaring is hard work and self-limits after 20-40 s. */
   fatigueFlareGain: 4.0,

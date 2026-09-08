@@ -132,6 +132,7 @@ interface SegmentWork {
 const pecPose = {
   sweep: 0,
   pitch: 0,
+  dSweepDPhase: 0,
   normal: v3(),
   velocityDir: v3(),
 };
@@ -276,6 +277,17 @@ export class FishLocomotion {
 
   get speed(): number {
     return len(this.velocity);
+  }
+
+  /**
+   * Forward speed in body lengths per second: the component of velocity along
+   * the fish's own axis. This is what the steering compares against its target
+   * speed. Total speed is the wrong quantity there — a fish sinking at one body
+   * length a second is not swimming, and treating it as though it were is how
+   * the tail ends up switched off while the fish bobs.
+   */
+  get forwardSpeedSL(): number {
+    return this.forwardSpeed / this.morphology.standardLength;
   }
 
   /** Speed in body lengths per second — the unit fish biology is written in. */
@@ -569,7 +581,10 @@ export class FishLocomotion {
       }
 
       const spread = 0.55 + 0.45 * cmd.finSpread;
-      pectoralPose(phase, side, spread, cmd.pectoralPitch, pecPose);
+      // How far out of its folded position the fin is: fully out by one beat a
+      // second, folded flat along the flank when still.
+      const rowing = Math.min(1, freq / 1.0);
+      pectoralPose(phase, side, spread, cmd.pectoralPitch, rowing, pecPose);
 
       // Blade centre, half a span out from the attachment along the blade axis.
       this.body.pectoralAttach(side, scratch.tmp);
@@ -580,7 +595,7 @@ export class FishLocomotion {
       copy(scratch.bladeC, scratch.tmp); // body-frame blade centre
 
       // Blade velocity from the sweep, in the body frame. d(centre)/dt.
-      const dSweep = 2 * Math.PI * freq * PECTORAL.sweepAmp * spread * Math.cos(phase);
+      const dSweep = 2 * Math.PI * freq * pecPose.dSweepDPhase;
       set(
         scratch.bladeV,
         side * -ss * dSweep * PECTORAL.span * 0.5,
@@ -614,8 +629,18 @@ export class FishLocomotion {
       if (s === 0) this.prevPecVnL = vn;
       else this.prevPecVnR = vn;
 
-      const fn =
-        -maBlade * dvn - 0.5 * RHO_WATER * FISH.crossFlowCd * PECTORAL.area * Math.abs(vn) * vn;
+      // Drag only. Rowing is drag-based propulsion — the literature's own term
+      // for it — and the reactive (added-mass) part of a paddle stroke puts an
+      // impulse into the water on one half-stroke and takes it back on the
+      // other, netting nothing over a cycle. The scalar form used on the body,
+      // -m_a * dv_n/dt along the instantaneous normal, does *not* net to zero
+      // when the normal rotates with the feathering: it produced a steady lift
+      // of several times the drag thrust, and the fish rose or dived on its
+      // pectorals at five centimetres a second. So it is left out here, where
+      // the normal rotates, and kept on the body, where it does not.
+      void dvn;
+      void maBlade;
+      const fn = -0.5 * RHO_WATER * FISH.crossFlowCd * PECTORAL.area * Math.abs(vn) * vn;
 
       scale(scratch.tmp, scratch.bladeN, fn);
       add(this.forces.pectoral, this.forces.pectoral, scratch.tmp);
@@ -661,6 +686,17 @@ export class FishLocomotion {
       scale(scratch.tmp, this.angularVelocity, -cRot * wl);
       add(T, T, scratch.tmp);
     }
+    // And the viscous part, linear in the rate, which is what actually stops a
+    // slow spin. See FISH.rotationalViscousTau. Applied in the body frame so
+    // each axis is damped against its own inertia.
+    {
+      const [Ipitch, Iyaw, Iroll] = this.morphology.effectiveInertiaBody;
+      const k = 1 / FISH.rotationalViscousTau;
+      quatRotateInv(scratch.tmp, this.orientation, this.angularVelocity);
+      set(scratch.tmp, -Ipitch * k * scratch.tmp.x, -Iyaw * k * scratch.tmp.y, -Iroll * k * scratch.tmp.z);
+      quatRotate(scratch.tmp2, this.orientation, scratch.tmp);
+      add(T, T, scratch.tmp2);
+    }
   }
 
   private accumulateContact(F: Vec3, T: Vec3): void {
@@ -673,8 +709,15 @@ export class FishLocomotion {
     // inject energy and is what makes a bumped fish jitter against a wall.
     const b = this.bounds;
     if (!b) return;
-    const k = 240; // N/m
-    const c = 0.9; // N.s/m
+    // Soft, because the fish is. Sized so that a fish arriving at the glass at
+    // a fast cruise — five body lengths a second — is brought to rest over
+    // about five millimetres: k = m v^2 / x^2 with the water it carries. The
+    // first value, 240 N/m, was a table leg: a fish nosing the glass while it
+    // struck at a pellet floating there met forces of forty times its weight
+    // and was flung back across the tank at twelve body lengths a second, over
+    // and over, every time it fed at the front.
+    const k = 12; // N/m
+    const c = 0.3; // N.s/m, near critical for the fish plus its added mass
     // The margin has to cover the fish's *reach*, not its girth. The centre of
     // mass sits roughly two centimetres behind the snout, so a margin of half
     // the body depth let the head poke straight through the glass while the

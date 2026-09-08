@@ -32,12 +32,23 @@ export class WaterSurface {
 
   private accumulator = 0;
   private timeAccum = 0;
+  /** Simulated time advanced per substep, for the continuous outlet forcing. */
+  private substepTime = 0;
+  /** Cells under the filter outlet, with their Gaussian weights. */
+  private readonly outletCells: Int32Array;
+  private readonly outletWeights: Float32Array;
 
   /** Linear acceleration of the tank in world space, gravity already removed. */
   private accelX = 0;
   private accelZ = 0;
 
-  constructor(nx = WATER.nx, nz = WATER.nz) {
+  /**
+   * @param outlet Whether the filter outlet runs. On in the tank; the tests
+   *   that compare the surface against the analytic wave equation turn it off,
+   *   because a surface with a source in it is never still and never fully
+   *   decays, and those tests are about the equation, not the tank.
+   */
+  constructor(nx = WATER.nx, nz = WATER.nz, private readonly outlet = true) {
     this.nx = nx;
     this.nz = nz;
     this.dx = TANK.width / (nx - 1);
@@ -89,6 +100,28 @@ export class WaterSurface {
         `Water damping is unstable: dt*(alpha*c*lambda_max + beta) = ${b.toFixed(3)}, ` +
           `which must stay well below 1. Lower WATER.alpha, WATER.beta or WATER.dt.`,
       );
+    }
+    // The filter outlet's footprint on the grid, computed once. The forcing
+    // runs every substep, so the cells it touches and their weights are worth
+    // having ready.
+    {
+      const cells: number[] = [];
+      const weights: number[] = [];
+      const r = WATER.outletRadius;
+      const cx = WATER.vortexCentre.x;
+      const cz = WATER.vortexCentre.z;
+      for (let j = 0; j < this.nz; j++) {
+        const wz = this.worldZ(j) - cz;
+        for (let i = 0; i < this.nx; i++) {
+          const wx = this.worldX(i) - cx;
+          const d2 = wx * wx + wz * wz;
+          if (d2 > r * r) continue;
+          cells.push(this.index(i, j));
+          weights.push(Math.exp(-3 * (d2 / (r * r))));
+        }
+      }
+      this.outletCells = Int32Array.from(cells);
+      this.outletWeights = Float32Array.from(weights);
     }
   }
 
@@ -213,6 +246,21 @@ export class WaterSurface {
 
   private substep(dt: number, applyForcing: boolean): void {
     const { nx, nz, height: h, vel: v, force: f, lapV } = this;
+    this.substepTime += dt;
+
+    // The filter outlet. A continuous source, so it is applied every substep
+    // rather than as a per-frame impulse, which would make the ripple height
+    // depend on the frame rate. Two slow modulations keep it from being a pure
+    // tone: a real return stream flutters.
+    if (this.outlet) {
+      const t = this.substepTime;
+      const flutter = 0.7 + 0.3 * Math.sin(2 * Math.PI * 0.23 * t + 1.0);
+      const hz = WATER.outletRippleHz * (1 + 0.08 * Math.sin(2 * Math.PI * 0.11 * t));
+      const a = WATER.outletRippleAccel * flutter * Math.sin(2 * Math.PI * hz * t) * dt;
+      for (let n = 0; n < this.outletCells.length; n++) {
+        v[this.outletCells[n]] += a * this.outletWeights[n];
+      }
+    }
     const c2 = WATER.waveSpeed * WATER.waveSpeed;
     const invDx2 = 1 / (this.dx * this.dx);
     const invDz2 = 1 / (this.dz * this.dz);

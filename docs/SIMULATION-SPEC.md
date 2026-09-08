@@ -18,6 +18,44 @@ Everything is SI: metres, kilograms, seconds, radians. Water is fresh water at 2
 
 ---
 
+## 0. What running it changed
+
+The first version of this document described a fish that, when finally watched
+rather than tested, bobbed up and down on the spot and could not turn round.
+Eighty to ninety per cent of the distance it covered was vertical. Every test
+passed, because no test asked where the fish went. The sections below are
+updated, but the list of what was wrong is worth having in one place, because
+each item is the kind of thing that passes a test and fails an eye:
+
+- **The swim bladder was an elevator.** Commanded from the pitch error, at
+  ±15% of body volume, it was the strongest vertical force the fish had. It is
+  now a trim tank at ±3%, driven by the height error (§4.4).
+- **The speed controller counted sinking as swimming.** It compared the target
+  speed with total speed, so a fish rising on its bladder had "reached" its
+  speed and the tail switched off. It now uses forward speed.
+- **The steering sign was backwards.** The body frame is right-handed with +z
+  forward and +y up, which puts +x on the fish's *left*; a comment said right,
+  and the turn command was signed for the comment. With the tail driving, the
+  fish turned away from every target and only crept towards it in the pauses.
+- **The pectoral fins produced no force at all.** The blade normal was set
+  along the fin's span, so the paddle moved edge-on. The whole slow-swimming
+  mode ran on nothing (§4.6).
+- **There was no way to turn at a standstill.** The "asymmetric beat" was a
+  static shift of a symmetric wave, which nets nothing at rest; the fish could
+  only turn as a rudder does, with water flowing past, on a radius wider than
+  the tank. It is now a genuine amplitude asymmetry (§4.1), and large turns are
+  made with a tail scull (§5.6).
+- **The glass was a table leg.** A contact spring of 240 N/m threw a fish that
+  nosed the pane at forty times its weight. It is 12 N/m.
+- **Fatigue was kinematic.** Counted from speed, being flung by the glass read
+  as a sprint and parked the fish in `rest`. It is now counted from the tail
+  beat, which is what the muscles are actually doing.
+- **The water was never disturbed**, so the surface was a perfect plane, the
+  caustics a constant and the tank looked dry. The filter outlet now keeps a
+  millimetre of ripple going (§3.4).
+
+---
+
 ## 1. Choice of animal
 
 The fish is a **Siamese fighting fish, *Betta splendens*** (a male veiltail).
@@ -242,6 +280,18 @@ a school.
 
 ---
 
+### 3.4 The filter outlet
+
+A tank with a filter running is never still. The return stream keeps a patch of
+small ripples going at the outlet, and those ripples are most of what makes the
+water visible: they carry the caustics, the wobble in everything seen through
+the surface, and the glints. Modelled as a continuous oscillating push on the
+surface velocity over a Gaussian patch 14 mm across at the outlet, at 2.6 Hz
+with slow flutter in both strength and frequency, sized to give ripples of
+about a millimetre. Applied every substep, not per frame, so the ripple height
+does not depend on the frame rate. Test: peak displacement between 0.2 and 3 mm,
+finite over a long run.
+
 ## 4. Fish locomotion
 
 The rule here is: **the fish's brain controls muscles, not velocity.** Nothing in the
@@ -283,11 +333,18 @@ the other, and adds a gentle camber to the whole body. Both are here, and they
 follow the amplitude envelope rather than an independent curve:
 
 ```
-offset(s) = (kappa_beat * 0.0038 m + kappa_camber * 0.010 m) * A(s)/A_tip
+h(s, t) = A(s) * [ sin(theta) + kappa * 0.8 * sin^2(theta) ] + kappa * 0.010 m * s^1.6
 ```
 
-The `0.0038 m` is about 80 % of the beat's own amplitude, which makes a strongly
-one-sided sweep without the tail ever crossing the centreline. An earlier version
+with `theta = 2*pi*s/lambda - 2*pi*f*t`. The `sin^2` term is one-signed and
+largest at the extremes of the stroke: it is an *amplitude* asymmetry, so the
+tail sweeps to 1.8 times its normal excursion on the turning side and barely
+crosses the centreline on the other. That is what turns the fish at a
+standstill — drag goes as the square of speed, so the fast half-stroke puts a
+net sideways impulse into the water at the tail. The first version was a
+static one-sided *shift* of the wave, with equal speeds both ways, which nets
+nothing at rest; the fish could then only turn as a rudder does, and its
+turning radius at any speed was wider than the tank. An earlier version
 used `0.010 m` for the beat term as well, which swung the fin tip nearly forty
 millimetres off the centreline — an escape-grade C-shape — several times a
 second; the entrained water on the tail turned each of those flips into fifteen
@@ -439,6 +496,45 @@ length and the linearity. Getting all of them at once is the evidence.
 
 ---
 
+### 4.6 Pectoral fins, corrected
+
+The pectoral is a paddle standing on its span. The span runs out from the body
+at the sweep angle, `(side*cos, 0, -sin)`; the blade's plane contains the span
+and the vertical, so its normal is `span x up`, tilted about the span by the
+feather angle, and the tilt mirrors with the side. The first version set the
+normal *along* the span, so the paddle moved edge-on and every stroke was free.
+
+Rowing is drag-based. The feather profile is `(1 - cos phase)/2` — flat through
+the power stroke, 83° edge-on through the recovery — not a sinusoid with a phase
+lead, which feathers both strokes equally. The reactive (added-mass) term is
+left out on the pectorals: with a normal that rotates during the stroke, the
+scalar form does not net to zero over a cycle and produced a steady lift of
+several times the drag thrust. When not rowing the fin folds back to 72° along
+the flank, edge-on to the flow, and its pitch is then an angle of attack: that
+is the elevator. Kept half-open and beating at cruise it was a dive plane.
+
+Measured: both fins at 4 Hz give 0.37 SL/s forwards; a single fin's yaw torque
+is real and correctly signed at 1.5e-7 N.m but the fish's effective yaw inertia
+is 1.35e-5 kg.m^2 — its own 3.8e-7 plus thirty-five times that of water its
+flanks and fins must shove sideways — so a pectoral pivot is a quarter of a
+degree a second. Pivots are made with the tail (§5.6).
+
+### 4.7 Swim bladder and depth
+
+The bladder is a trim tank, ±3% of neutral volume, slewing over seconds towards
+whatever makes the fish neutrally buoyant at the height it wants. It is driven
+by the height error, never the pitch error. Climbing and diving are done by
+swimming with the body pitched and the pectorals angled, with the climb rate fed
+back into the pitch demand (gain 25 s/m) so the height loop levels off instead
+of porpoising.
+
+### 4.8 Contact and damping
+
+The glass is a spring of 12 N/m with 0.3 N.s/m of damping — a fast cruise into
+the pane stops over about five millimetres. Rotation is damped by the cross-flow
+drag (quadratic) plus a viscous term with a 2.5 s time constant, so a kicked
+fish does not coast in yaw indefinitely but a slow turn is not smothered.
+
 ## 5. Behaviour — the fish's brain
 
 The architecture follows Tu and Terzopoulos's *Artificial Fishes* (SIGGRAPH 1994): a
@@ -479,7 +575,7 @@ anything else.
 | `hunger` | continuously, faster when active | eating a pellet: `-0.16` each | full swing ~6 h |
 | `airDebt` | continuously, `+2.2x` when swimming hard | a surface gulp: to 0 | forces a gulp every 4–11 min |
 | `fear` | looming, impacts, sudden light change | exponential decay | `tau = 26 s` |
-| `fatigue` | above an aerobic cruise of `4 SL/s`, with the cube of the excess | slowly, faster at rest | `tau_recover = 90 s` |
+| `fatigue` | above an aerobic tail beat of `4.3 Hz` (the beat that gives 4 SL/s), with the cube of the excess | slowly, faster at rest | `tau_recover = 90 s` |
 | `aggression` | seeing a rival (reflection / face) | exponential decay | `tau = 45 s`, refractory 20 s |
 | `boredom` | in familiar places | exploring novelty | drives patrolling |
 
@@ -578,6 +674,23 @@ means the fish accelerates on its own hydrodynamic terms and always lags its own
 intention slightly, the way an animal with muscle and inertia does.
 
 ---
+
+### 5.6 Steering, corrected
+
+The heading error is the angle to the target in the fish's horizontal plane,
+and only when there is a horizontal component worth turning for: a target
+within about 15° of straight up or down needs pitch, not yaw. Targets are
+clamped inside the tank before steering, three centimetres from every pane.
+
+Turns of more than about 50° are made on the spot with a **tail scull**: three
+beats a second at full asymmetry, the body curled to a quarter of its reflex
+range, pectorals folded, brakes on. Measured: about 22°/s on a radius near
+10 cm, with peak hydrodynamic force 1.3 times the fish's weight. Half the reflex
+range turned faster but at nineteen times the weight, which is a C-start. At
+cruise, turning is the asymmetric beat plus the camber acting as a rudder, with
+a PD law on the heading (gain 1.35, rate 0.035) whose sign is set by
+measurement. The speed controller integrates the tail beat towards the *forward*
+speed error; sinking is not swimming.
 
 ## 6. Food
 

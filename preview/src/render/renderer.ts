@@ -70,6 +70,7 @@ import {
   sub,
   cross,
   normalize,
+  copy,
 } from '../sim/math.js';
 
 const CAUSTIC_SIZE = 256;
@@ -111,6 +112,16 @@ export class Renderer {
 
   private sceneTarget!: RenderTarget;
   private sceneDepth!: WebGLTexture;
+  /** The scene from the camera mirrored in the water plane, for the surface. */
+  private reflectionTarget!: RenderTarget;
+  private reflectionDepth!: WebGLRenderbuffer;
+  /** Scales the caustic map so a flat surface reads 1.0. Measured at start-up. */
+  private causticNorm = 1;
+  /** Reflection-pass clipping side; 0 in the main pass. */
+  private clipSide = 0;
+  /** Index applied to geometry seen through the panes; 1 in the reflection pass. */
+  private refractIOR: number = OPTICS.iorWater;
+  private mirrored = false;
   private volumeTarget!: RenderTarget;
   private surfaceTarget!: RenderTarget;
   private causticsTarget!: RenderTarget;
@@ -128,6 +139,7 @@ export class Renderer {
 
   private width = 1;
   private height = 1;
+  private readonly cameraTarget = v3();
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -245,6 +257,32 @@ export class Renderer {
     );
 
     this.resize();
+    this.calibrateCaustics();
+  }
+
+  /**
+   * Measure what the caustic map reads for a perfectly flat surface, so the
+   * shaders can treat that level as "no focusing". The map is an accumulation
+   * of splatted rays and its absolute level depends on how many were splatted
+   * and how they were blurred — a number with no physical meaning on its own.
+   * Ray splatting conserves the light, so the mean does not change as the
+   * surface moves; only its distribution does. Measured once, at start-up,
+   * while the surface is still flat.
+   */
+  private calibrateCaustics(): void {
+    const gl = this.gl;
+    this.renderCaustics();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.causticsBlur.framebuffer);
+    const px = new Float32Array(CAUSTIC_SIZE * CAUSTIC_SIZE * 4);
+    gl.readPixels(0, 0, CAUSTIC_SIZE, CAUSTIC_SIZE, gl.RGBA, gl.FLOAT, px);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    let sum = 0;
+    for (let i = 0; i < CAUSTIC_SIZE * CAUSTIC_SIZE; i++) sum += px[i * 4];
+    const mean = sum / (CAUSTIC_SIZE * CAUSTIC_SIZE);
+    // A read-back that fails (some drivers refuse float reads) comes back as
+    // zeros; fall back to the value measured in development rather than
+    // dividing by it.
+    this.causticNorm = Number.isFinite(mean) && mean > 1e-6 ? 1 / mean : 1 / 0.0053;
   }
 
   resize(): void {
@@ -278,6 +316,18 @@ export class Renderer {
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, this.sceneDepth, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.surfaceTarget.framebuffer);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, this.sceneDepth, 0);
+
+    // The reflection at half resolution: it is seen through a rippling surface
+    // and blurred by it, and a full-size copy of the scene pass is not worth
+    // its cost.
+    const rw = Math.max(1, w >> 1);
+    const rh = Math.max(1, h >> 1);
+    this.reflectionTarget = createRenderTarget(gl, rw, rh, gl.RGBA16F, gl.RGBA, gl.FLOAT);
+    this.reflectionDepth = gl.createRenderbuffer()!;
+    gl.bindRenderbuffer(gl.RENDERBUFFER, this.reflectionDepth);
+    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, rw, rh);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.reflectionTarget.framebuffer);
+    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, this.reflectionDepth);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
@@ -287,6 +337,7 @@ export class Renderer {
     this.cameraPos.y = camera.target.y + camera.distance * Math.sin(camera.pitch);
     this.cameraPos.z = camera.target.z + camera.distance * cp * Math.cos(camera.yaw);
 
+    copy(this.cameraTarget, camera.target);
     mat4LookAt(this.view, this.cameraPos, camera.target, v3(0, 1, 0));
     mat4Perspective(this.projection, (38 * Math.PI) / 180, this.width / this.height, 0.01, 4);
     mat4Multiply(this.viewProjection, this.projection, this.view);
@@ -321,6 +372,11 @@ export class Renderer {
     if (u.uAmbient) gl.uniform3f(u.uAmbient, 0.10, 0.13, 0.15);
     if (u.uExposure) gl.uniform1f(u.uExposure, 1.5);
 
+    if (u.uCausticNorm) gl.uniform1f(u.uCausticNorm, this.causticNorm);
+    if (u.uWaterMin) gl.uniform3f(u.uWaterMin, -TANK.width / 2, TANK.floorY, TANK_MIN_Z);
+    if (u.uWaterMax) gl.uniform3f(u.uWaterMax, TANK.width / 2, TANK.waterY, 0);
+    if (u.uRefractIOR) gl.uniform1f(u.uRefractIOR, this.refractIOR);
+    if (u.uClipSide) gl.uniform1f(u.uClipSide, this.clipSide);
     if (u.uFilmThickness) gl.uniform1f(u.uFilmThickness, OPTICS.filmThicknessNm);
     if (u.uFilmIOR) gl.uniform1f(u.uFilmIOR, OPTICS.iorFilm);
     if (u.uBaseIOR) gl.uniform1f(u.uBaseIOR, OPTICS.iorSkinBase);
@@ -399,11 +455,70 @@ export class Renderer {
     gl.clearColor(0.015, 0.02, 0.024, 1);
     gl.clearDepth(1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    this.clipSide = 0;
+    this.refractIOR = OPTICS.iorWater;
+    this.mirrored = false;
+    this.drawSceneGeometry(time);
+  }
+
+  /**
+   * The scene as seen from the camera mirrored in the water plane.
+   *
+   * For a flat mirror the reflection at a pixel is exactly what the mirrored
+   * camera sees at that pixel, so this is the correct way to reflect a plane,
+   * not an approximation; the surface shader then perturbs the lookup with the
+   * ripple normal, which is one. Only geometry on the far side of the water
+   * from the real camera is drawn: from above, the rim of the glass and the
+   * room; from below, the tank interior, which is what the underside of the
+   * surface shows past the critical angle. Refraction is off, because the
+   * mirror is inside the water and sees it directly.
+   */
+  private renderReflection(time: number): void {
+    const gl = this.gl;
+    const wy = TANK.waterY;
+
+    // Reflect the *world* in the plane y = waterY and draw it with the real
+    // camera. That puts the reflection of each point on exactly the pixel where
+    // the surface shader will look for it. (A camera merely moved to the
+    // mirrored position sees a left-right mirrored image instead, which was
+    // the first attempt.) The reflection reverses handedness, hence the cull
+    // flip in drawSceneGeometry. Lighting uses the mirrored eye, so specular
+    // highlights land where the mirror would put them.
+    const savedPos = v3(this.cameraPos.x, this.cameraPos.y, this.cameraPos.z);
+    const savedVP = new Float32Array(this.viewProjection);
+    const reflect = mat4();
+    reflect[5] = -1;
+    reflect[13] = 2 * wy;
+    mat4Multiply(this.viewProjection, savedVP as unknown as Mat4, reflect);
+    copy(this.cameraPos, v3(savedPos.x, 2 * wy - savedPos.y, savedPos.z));
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.reflectionTarget.framebuffer);
+    gl.viewport(0, 0, this.width >> 1, this.height >> 1);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clearDepth(1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    this.clipSide = savedPos.y > wy ? 1 : -1;
+    this.refractIOR = 1;
+    this.mirrored = true;
+    this.drawSceneGeometry(time);
+
+    // Restore the real camera.
+    copy(this.cameraPos, savedPos);
+    this.viewProjection.set(savedVP);
+    this.clipSide = 0;
+    this.refractIOR = OPTICS.iorWater;
+    this.mirrored = false;
+  }
+
+  private drawSceneGeometry(time: number): void {
+    const gl = this.gl;
+    gl.viewport(0, 0, this.mirrored ? this.width >> 1 : this.width, this.mirrored ? this.height >> 1 : this.height);
     gl.enable(gl.DEPTH_TEST);
     gl.depthFunc(gl.LEQUAL);
     gl.disable(gl.BLEND);
     gl.enable(gl.CULL_FACE);
-    gl.cullFace(gl.BACK);
+    // A mirrored view reverses the winding of every triangle.
+    gl.cullFace(this.mirrored ? gl.FRONT : gl.BACK);
 
     // --- Tank and plants ---
     gl.useProgram(this.tankProgram.program);
@@ -425,7 +540,7 @@ export class Renderer {
     // A red-and-blue betta: red pigment layer, with the blue-green iridescence
     // of the guanine platelets over it. That combination is what a "royal blue"
     // or "red dragon" betta actually is.
-    if (fu.uBaseColour) gl.uniform3f(fu.uBaseColour, 0.42, 0.045, 0.055);
+    if (fu.uBaseColour) gl.uniform3f(fu.uBaseColour, 0.55, 0.045, 0.06);
     if (fu.uBellyColour) gl.uniform3f(fu.uBellyColour, 0.30, 0.10, 0.08);
     if (fu.uRoughness) gl.uniform1f(fu.uRoughness, OPTICS.mucusRoughness);
     this.bodyGpu.draw();
@@ -558,8 +673,12 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.volumeTarget.texture);
     gl.uniform1i(u.uScene!, 0);
     this.bindCaustics(this.waterProgram, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.reflectionTarget.texture);
+    if (u.uReflection) gl.uniform1i(u.uReflection, 2);
     if (u.uViewport) gl.uniform2f(u.uViewport, this.width, this.height);
-    if (u.uSkyColour) gl.uniform3f(u.uSkyColour, 0.14, 0.17, 0.20);
+    // The surface itself is where it is; only what is seen through it shifts.
+    if (u.uRefractIOR) gl.uniform1f(u.uRefractIOR, 1);
     this.waterGpu.draw();
   }
 
@@ -583,6 +702,7 @@ export class Renderer {
     this.resize();
     this.setCamera(camera);
     this.renderCaustics();
+    this.renderReflection(time);
     this.renderScene(time);
     this.renderVolume(time);
     this.renderSurface(time);

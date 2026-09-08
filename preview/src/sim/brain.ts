@@ -439,9 +439,15 @@ export class FishBrain {
   private updateDrives(loco: FishLocomotion, dt: number): void {
     const d = this.drives;
     const ts = this.cfg.timeScale;
-    const speedSL = loco.speedSL;
-    // Effort, normalised so a brisk cruise is about 1.
-    const effort = saturate(speedSL / 3);
+    // (speed itself is no longer an input to the drives; see `effort` below)
+    // Effort, from what the muscles are doing rather than from how fast the
+    // fish happens to be moving. The two differ exactly when it matters: a fish
+    // bounced off the glass is moving fast and working not at all, and a fish
+    // pushing against a current is working hard and going nowhere. The tail-beat
+    // frequency is the muscle's own clock; a brisk cruise is about three beats a
+    // second on this fish.
+    const beat = this.lastCommandFrequency;
+    const effort = saturate(beat / 3);
 
     d.hunger = saturate(d.hunger + DRIVES.hungerRate * (1 + DRIVES.hungerActivityGain * effort) * dt * ts);
 
@@ -463,7 +469,11 @@ export class FishBrain {
     // an ordinary cruising speed, meant the fish was accruing fatigue whenever it
     // moved at all: it saturated, `rest` won permanently, and the fish lay on the
     // bottom and never surfaced for air again.
-    const burst = Math.max(0, speedSL - DRIVES.aerobicSpeedSL);
+    // In beats per second rather than body lengths per second: the fit of speed
+    // against beat frequency for this fish puts four body lengths a second at
+    // about 4.3 Hz, and using the beat means a collision cannot be mistaken for
+    // a sprint.
+    const burst = Math.max(0, beat - DRIVES.aerobicBeatHz);
     const flaring = this.intention === 'flare' ? DRIVES.fatigueFlareGain : 0;
     d.fatigue = saturate(
       d.fatigue + (DRIVES.fatigueSpeedGain * burst * burst * burst + flaring * 0.01) * dt * ts,
@@ -674,7 +684,9 @@ export class FishBrain {
         addScaled(g.target, p.wallAway, 0.12);
         g.target.y = clamp(g.target.y, TANK.floorY + 0.02, TANK.waterY - 0.01);
         g.speedSL = 1.6;
-        g.urgency = saturate(1 - p.wallDistance / INTENTION.wallAvoidDistance);
+        // A wall is not a predator. Half urgency at most: a swerve, not a
+        // burst — at full urgency the swerve itself flung the fish about.
+        g.urgency = 0.5 * saturate(1 - p.wallDistance / INTENTION.wallAvoidDistance);
         g.finSpread = 0.6;
         break;
       }
@@ -966,14 +978,34 @@ export class FishBrain {
       addScaled(g.target, p.wallAway, strength);
     }
 
+    // Whatever a routine asked for, the place to go is inside the tank. A
+    // forage heading or a scent gradient can put the target beyond the glass,
+    // and a fish steering for a point outside the tank presses itself against
+    // the pane until the contact model throws it back.
+    g.target.x = clamp(g.target.x, TANK_MIN_X + 0.03, -TANK_MIN_X - 0.03);
+    g.target.z = clamp(g.target.z, TANK_MIN_Z + 0.03, -0.03);
+    g.target.y = clamp(g.target.y, TANK.floorY + 0.02, TANK.waterY - 0.004);
+
     sub(scratch.toTarget, g.target, loco.position);
     const distance = len(scratch.toTarget);
     if (distance > 1e-6) scale(scratch.desired, scratch.toTarget, 1 / distance);
     else set(scratch.desired, 0, 0, 1);
 
-    // Heading error, in the fish's own frame: +x is its right, +y its up.
+    // Heading error, in the fish's own frame. The frame is right-handed with +z
+    // forward and +y up, which puts +x on the fish's *left*; the sign
+    // conventions below were set by measurement (see probe-turn), not from the
+    // labels.
     quatRotateInv(scratch.local, loco.orientation, scratch.desired);
-    const yawError = Math.atan2(scratch.local.x, Math.max(1e-4, scratch.local.z));
+    // The yaw error is the heading error in the horizontal plane, and only
+    // when there is a horizontal component worth turning for. A target nearly
+    // straight above or below needs pitch, not yaw — a pellet floating four
+    // centimetres over the fish's head is reached by climbing, and an earlier
+    // version, which clamped the forward component to a hair above zero,
+    // read that pellet as ninety degrees off to one side and had the fish
+    // pivot on the spot beneath its food indefinitely. Behind is behind:
+    // clamping also turned every target astern into one abeam.
+    const horizontal = Math.hypot(scratch.local.x, scratch.local.z);
+    const yawError = horizontal > 0.25 ? Math.atan2(scratch.local.x, scratch.local.z) : 0;
     const pitchError = Math.asin(clamp(scratch.local.y, -1, 1));
 
     // Turning is a steady one-sided bend of the body, driven by a PD controller
@@ -997,18 +1029,41 @@ export class FishBrain {
     const yawRate = this.yawRateFiltered;
     const pitchRate = this.pitchRateFiltered;
     const turnGain = 1.35 * (0.65 + 0.35 * g.urgency);
-    cmd.bend = clamp(-turnGain * yawError - 0.035 * yawRate, -1, 1);
+    // Positive bend sweeps the tail towards +x and, with water flowing past,
+    // turns the fish towards +x — measured, and the opposite of what this line
+    // said for a long time. With the sign wrong the fish turned *away* from its
+    // target whenever the tail was driving, and only crept towards it in the
+    // pauses in between; it was never more than a limit cycle fifty degrees off
+    // where it wanted to go.
+    cmd.bend = clamp(turnGain * yawError - 0.035 * yawRate, -1, 1);
 
-    // Depth is held two ways, on two very different timescales. The swim bladder
-    // is slow — several seconds end to end — and does the steady-state work; the
-    // body's vertical bend is immediate and does the manoeuvring, by angling the
-    // fish so its own forward motion carries it up or down.
-    cmd.bladder = clamp(pitchError * 2.2, -1, 1);
-    cmd.pitchBend = clamp(pitchError * 1.6 * (0.6 + 0.4 * g.urgency) - 0.03 * pitchRate, -1, 1);
+    // Depth is held two ways, on two very different timescales.
+    //
+    // The swim bladder is a trim tank. It drifts slowly towards whatever makes
+    // the fish neutrally buoyant at the depth it wants to be, and it is driven
+    // by the *height* error, not the pitch error: it has no business responding
+    // to which way the fish's nose is pointing. An earlier version fed it the
+    // pitch error at a gain that made it the strongest vertical force the fish
+    // had, and the fish rose and sank on its bladder with the tail switched off.
+    const heightError = g.target.y - loco.position.y;
+    cmd.bladder = clamp(heightError / 0.03, -1, 1);
+    // The manoeuvring is done by swimming: the body pitches and the pectorals
+    // angle, and the fish's own forward motion carries it up or down.
+    //
+    // The height loop needs damping of its own. Pointing at the target and
+    // holding that pitch is a controller on *angle*; the quantity that actually
+    // has to settle is *height*, which is the integral of climb rate, and a
+    // proportional controller on the integral of what it controls oscillates.
+    // Feeding back the climb rate is what turns porpoising into a level-off.
+    // Twenty-five is the gain at which climbing at two centimetres a second —
+    // a brisk rate for this fish — halves the commanded pitch.
+    const climbRate = loco.velocity.y;
+    const pitchDemand = pitchError - clamp(25 * climbRate, -0.6, 0.6);
+    cmd.pitchBend = clamp(pitchDemand * 1.6 * (0.6 + 0.4 * g.urgency) - 0.03 * pitchRate, -1, 1);
     // The pectorals are the elevators, and they do most of the work: the body's
     // own vertical bend is almost useless for climbing on a fish this laterally
     // compressed.
-    cmd.pectoralPitch = clamp(pitchError * 2.4 - 0.20 * pitchRate, -1, 1);
+    cmd.pectoralPitch = clamp(pitchDemand * 2.4 - 0.20 * pitchRate, -1, 1);
 
     // Slow down to turn.
     //
@@ -1020,16 +1075,58 @@ export class FishBrain {
     // when it changes direction in a confined space. At walking pace it can pivot
     // almost on the spot with its pectorals.
     const turnPenalty = 1 - 0.75 * saturate(Math.abs(yawError) / 1.1);
-    const speedError = g.speedSL * turnPenalty - loco.speedSL;
+    // Forward speed, not total speed. Sinking is not swimming.
+    const speedError = g.speedSL * turnPenalty - loco.forwardSpeedSL;
 
-    if (g.hover || g.speedSL < FISH.pectoralOnlySpeedSL) {
+    // A large turn is made on the spot with the pectorals, not on the move with
+    // the tail.
+    //
+    // The tail turns the fish by sweeping asymmetrically, and that only works
+    // with water flowing past the body: at a standstill a full one-sided sweep
+    // produces almost no yaw and almost no thrust. The failure this prevents was
+    // watched in detail: the fish, two centimetres from the glass with its
+    // target behind it, held full bend for five seconds while the speed
+    // controller wound the tail up to eight beats a second trying to reach a
+    // speed the bent tail could not deliver, drove itself into the glass, and
+    // was flung backwards at five body lengths a second. A betta turning round
+    // in a small tank pivots with its pectorals first, then swims off.
+    const pivoting = Math.abs(yawError) > 0.85;
+
+    if (pivoting) {
+      // A tail scull: a slow beat at full asymmetry, with the pectorals held out
+      // as brakes so the fish turns on the spot rather than swimming a wide
+      // arc. This is the turn a betta makes to face the other way in a small
+      // tank. The frequency is set, not integrated: the speed controller would
+      // otherwise wind the tail up trying to reach a speed the scull is not
+      // meant to produce.
+      //
+      // Three beats a second with the body curled to half its reflex range
+      // measured best: about thirty degrees a second on a ten-centimetre
+      // radius. Slower beats turn less; a tighter curl turns the body into a
+      // hoop and the beat stops working. The fish's own yaw inertia is small,
+      // but the water its flanks and fins must shove sideways to rotate is
+      // thirty-five times larger, and that is what sets the rate.
+      cmd.frequency = expApproach(cmd.frequency, 3.0, 6, dt);
+      cmd.amplitude = FISH.standardLength * FISH.tailAmplitudeRatio;
+      cmd.pectoralLeft = expApproach(cmd.pectoralLeft, 0, 4, dt);
+      cmd.pectoralRight = expApproach(cmd.pectoralRight, 0, 4, dt);
+      cmd.brake = expApproach(cmd.brake, 0.8, 8, dt);
+    } else if (g.hover || g.speedSL < FISH.pectoralOnlySpeedSL) {
       // Slow work is done with the pectorals, which is what a hovering betta
       // actually uses. The tail stops.
       cmd.frequency = expApproach(cmd.frequency, 0, 6, dt);
+      // No body bend while pivoting. Bending into a C at a standstill is a
+      // C-start, not a turn: the recoil kicks the head the *other* way and the
+      // fish spins on the kick. The pectorals do the turning here.
+      cmd.bend = expApproach(cmd.bend, 0, 8, dt);
       const base = clamp(1.6 + speedError * 2.5, 0.4, FISH.maxPectoralHz);
       // Differential beat turns the fish on the spot, and lets it back up —
       // bettas can swim backwards, and this falls out without extra machinery.
-      const diff = clamp(-yawError * 1.4 - 0.03 * yawRate, -1, 1);
+      // Rowing the fin on the -x side (index 0) yaws the fish towards +x, as
+      // rowing one oar turns a boat away from it. Sign by measurement.
+      const diff = clamp(yawError * 1.4 - 0.03 * yawRate, -1, 1);
+      // Both fins keep rowing through a pivot — one harder than the other — so
+      // the fish also creeps forwards, as a real one does.
       cmd.pectoralLeft = clamp(base * (1 + diff), 0, FISH.maxPectoralHz);
       cmd.pectoralRight = clamp(base * (1 - diff), 0, FISH.maxPectoralHz);
       cmd.amplitude = FISH.standardLength * FISH.tailAmplitudeRatio * 0.4;
@@ -1038,10 +1135,15 @@ export class FishBrain {
       // driving instantly but cannot summon power instantly.
       const rate = speedError < 0 ? 9.0 : 3.5;
       cmd.frequency = clamp(cmd.frequency + rate * speedError * dt, 0, FISH.maxTailBeatHz);
-      // Keep a slow beat going even while the tail is driving: the fins have to
-      // stay extended to work as elevators.
-      cmd.pectoralLeft = expApproach(cmd.pectoralLeft, 0.5, 4, dt);
-      cmd.pectoralRight = expApproach(cmd.pectoralRight, 0.5, 4, dt);
+      // Fold the pectorals. A cruising betta lays them along its flanks, and in
+      // this model that is also what makes them elevators: folded, the blade is
+      // edge-on to the flow and its pitch is an angle of attack. An earlier
+      // version kept a slow beat going "so the fins stay extended", and a
+      // half-open fin with a one-sided feather in a thirteen-centimetre-a-second
+      // flow was a dive plane: the fish sank at seven centimetres a second at
+      // cruise, whatever its tail was doing.
+      cmd.pectoralLeft = expApproach(cmd.pectoralLeft, 0, 4, dt);
+      cmd.pectoralRight = expApproach(cmd.pectoralRight, 0, 4, dt);
       // Amplitude is nearly constant in real steady swimming — fish change speed
       // by changing frequency — and only opens up in a burst.
       const burst = this.intention === 'escape';
@@ -1051,15 +1153,23 @@ export class FishBrain {
     }
 
     // Brake when going faster than intended, and hard when much faster.
-    cmd.brake = expApproach(cmd.brake, saturate(-speedError * 0.8), 14, dt);
+    if (!pivoting) cmd.brake = expApproach(cmd.brake, saturate(-speedError * 0.8), 14, dt);
 
-    cmd.agility = g.urgency;
+    // A pivot gets a quarter of the reflex range of body curl: the camber is
+    // what points the tail's push sideways instead of backwards. Not more —
+    // at half the range the sweep reached thirteen millimetres at three beats
+    // a second and the reactive force on it was nineteen times the fish's
+    // weight, which is a C-start, not a turn. An escape keeps its own urgency.
+    cmd.agility = this.intention === 'escape' ? g.urgency : pivoting ? 0.25 : g.urgency;
     cmd.finSpread = expApproach(cmd.finSpread, g.finSpread, 3.5, dt);
     cmd.gillFlare = expApproach(cmd.gillFlare, g.gillFlare, 5, dt);
     cmd.mouthOpen = expApproach(cmd.mouthOpen, g.mouthOpen, 18, dt);
   }
 
   // -------------------------------------------------------------------------
+
+  /** The tail-beat frequency commanded last tick, for the effort model. */
+  private lastCommandFrequency = 0;
 
   /** One brain tick. Called at the frame rate, not the physics rate. */
   step(
@@ -1090,6 +1200,7 @@ export class FishBrain {
       );
     }
 
+    this.lastCommandFrequency = cmd.frequency;
     this.updateDrives(loco, dt);
     this.arbitrate(loco, dt);
     this.runRoutine(loco, water, dt);

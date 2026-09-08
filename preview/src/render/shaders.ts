@@ -36,6 +36,53 @@ uniform vec3 uLightColour;
 uniform vec3 uAmbient;
 uniform float uExposure;
 
+// The caustic map is an accumulation of ray splats, and its absolute level
+// depends on how many rays were splatted. This scales it so that a perfectly
+// flat surface reads exactly 1.0; measured once at start-up from that flat
+// surface, so focusing brightens and defocusing darkens relative to a level
+// that means something.
+uniform float uCausticNorm;
+// The box the water occupies: (minX, floorY, minZ) to (maxX, waterY, maxZ).
+uniform vec3 uWaterMin;
+uniform vec3 uWaterMax;
+// Index of refraction applied to geometry seen through the tank's panes, or
+// 1.0 to draw geometry where it really is (the reflection pass does that).
+uniform float uRefractIOR;
+// Reflection-pass clipping: +1 keeps fragments above the water, -1 below,
+// 0 keeps everything.
+uniform float uClipSide;
+
+// The light a flat surface gets, multiplied by this: 1.0 where the surface is
+// flat, brighter where rays converge, darker where they spread.
+float causticLight(float raw, float strength) {
+  return mix(1.0, raw * uCausticNorm, strength);
+}
+
+// The room above the tank, for the surface to reflect. There is no room
+// geometry, so this is analytic: a dark ceiling, and the hood lamp — a warm
+// strip above the tank — which is what a real aquarium surface reflects, as a
+// bright stretched streak that breaks up with every ripple.
+vec3 envColour(vec3 from, vec3 dir) {
+  // A lit room: a wall across from the tank, brighter towards the ceiling, so
+  // that from a low viewing angle the surface has something to reflect. Made
+  // near-black the first time, and from eye level the surface simply vanished.
+  vec3 room = mix(vec3(0.07, 0.075, 0.085), vec3(0.24, 0.25, 0.27), clamp(dir.y * 0.8 + 0.4, 0.0, 1.0));
+  // The wall behind the viewer, with a window or a lamp on it: a broad soft
+  // glow in the direction the surface reflects when looked at from the front
+  // and a little above. This is what the surface of a tank on a desk shows.
+  float win = max(0.0, dot(dir, normalize(vec3(0.0, 0.45, 1.0))));
+  room += vec3(0.9, 0.88, 0.85) * pow(win, 6.0) * 0.55;
+  if (dir.y <= 1e-4) return room;
+  float lampY = uWaterMax.y + 0.16;
+  float t = (lampY - from.y) / dir.y;
+  vec3 hit = from + dir * t;
+  // A lamp the width of the tank, set back over its middle.
+  float inX = smoothstep(0.02, 0.0, abs(hit.x) - uWaterMax.x * 0.9);
+  float inZ = smoothstep(0.02, 0.0, abs(hit.z - (uWaterMin.z + uWaterMax.z) * 0.5) - 0.045);
+  vec3 lamp = vec3(1.0, 0.94, 0.82) * 2.6;
+  return room + lamp * inX * inZ;
+}
+
 // Beer-Lambert: what survives a path of the given length through the water.
 vec3 transmittance(float pathLength) {
   return exp(-uAbsorption * pathLength);
@@ -167,13 +214,40 @@ out vec2 vUV;
 out vec2 vExtra;
 out vec3 vView;
 
+// Where a point under water *appears* to be from an eye outside it.
+//
+// Light from a point inside the tank bends at the pane on its way out, and to
+// the eye the point sits closer than it is: a tank 25 cm deep looks about 19.
+// Every fish tank does this and it is one of the strongest cues that there is
+// water behind the glass rather than air, because the sand, the plants and the
+// fish all shift against the frame as the viewer moves.
+//
+// This is the paraxial result — the part of the path inside the water appears
+// shortened by the index of refraction, along the line of sight — applied per
+// vertex. Exact for near-normal viewing, and within a degree or two over the
+// angles a person looks into a tank at.
+vec3 apparentPosition(vec3 p) {
+  if (uRefractIOR <= 1.0) return p;
+  bool eyeInside = all(greaterThan(uCameraPos, uWaterMin)) && all(lessThan(uCameraPos, uWaterMax));
+  bool pointInside = all(greaterThanEqual(p, uWaterMin - 1e-4)) && all(lessThanEqual(p, uWaterMax + 1e-4));
+  if (eyeInside || !pointInside) return p;
+  vec3 d = p - uCameraPos;
+  d += vec3(equal(d, vec3(0.0))) * 1e-7;
+  vec3 t0 = (uWaterMin - uCameraPos) / d;
+  vec3 t1 = (uWaterMax - uCameraPos) / d;
+  vec3 tn = min(t0, t1);
+  float tEnter = clamp(max(max(tn.x, tn.y), tn.z), 0.0, 1.0);
+  vec3 q = uCameraPos + d * tEnter;
+  return q + (p - q) / uRefractIOR;
+}
+
 void main() {
   vWorldPos = aPosition;
   vNormal = normalize(aNormal);
   vUV = aUV;
   vExtra = aExtra;
   vView = normalize(uCameraPos - aPosition);
-  gl_Position = uViewProjection * vec4(aPosition, 1.0);
+  gl_Position = uViewProjection * vec4(apparentPosition(aPosition), 1.0);
 }
 `;
 
@@ -207,6 +281,7 @@ uniform float uTime;
 out vec4 fragColour;
 
 void main() {
+  if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
   vec3 N = normalize(vNormal);
   vec3 V = normalize(vView);
   vec3 L = normalize(uLightDir);
@@ -234,7 +309,10 @@ void main() {
   // Perturb the normal so each scale is a slightly domed plate.
   vec3 tangent = normalize(cross(N, vec3(0.0, 1.0, 0.0)) + vec3(1e-4));
   vec3 bitangent = cross(N, tangent);
-  N = normalize(N + (tangent * local.x + bitangent * local.y) * 0.35 * (1.0 - scaleEdge));
+  // Gentle doming. At 0.35 every scale's rim was a grazing angle and the
+  // iridescence lit up across the whole flank, which read as pink-white
+  // rather than red with a sheen.
+  N = normalize(N + (tangent * local.x + bitangent * local.y) * 0.16 * (1.0 - scaleEdge));
   NdotV = max(dot(N, V), 1e-4);
   NdotL = max(dot(N, L), 0.0);
   NdotH = max(dot(N, normalize(V + L)), 0.0);
@@ -270,15 +348,21 @@ void main() {
     (vWorldPos.x + uCausticsExtent.x) / (2.0 * uCausticsExtent.x),
     (vWorldPos.z + uCausticsExtent.y) / uCausticsExtent.y
   );
-  float caustic = texture(uCaustics, cuv).r;
-  // Only lit surfaces catch it, and less so the deeper they are.
   float depthBelow = max(0.0, uWaterY - vWorldPos.y);
-  caustic *= smoothstep(-0.1, 0.4, N.y) * exp(-depthBelow * 1.5);
+  // Only lit surfaces catch it, and less so the deeper they are.
+  float causticMod = causticLight(texture(uCaustics, cuv).r,
+                                  0.85 * smoothstep(-0.1, 0.4, N.y) * exp(-depthBelow * 1.5));
 
-  vec3 lit = uLightColour * (1.0 + caustic * 2.4) * NdotL;
+  vec3 lit = uLightColour * causticMod * NdotL;
   vec3 colour = albedo * (lit + uAmbient);
-  colour += specular * lit * 2.0;
-  colour += iridescence * irisMask * (lit * 0.55 + uAmbient * 0.8) * 1.15;
+  colour += specular * lit * 1.2;
+  // Iridescence is a reflection off the guanine platelets, so it lives near
+  // the specular direction and at grazing angles, not spread evenly over the
+  // flank as a diffuse glow. Weighted evenly it washed the whole fish to a
+  // pinkish white; the pigment never showed through.
+  float irisView = 0.05 + 0.95 * pow(1.0 - NdotV, 3.0);
+  float irisGlint = D * 0.25;
+  colour += iridescence * irisMask * (irisView + irisGlint) * (lit * 0.7 + uAmbient * 0.5);
 
   // --- Subsurface ---
   //
@@ -288,7 +372,7 @@ void main() {
   float back = pow(max(0.0, dot(V, -L)), 4.0);
   vec3 sss = vec3(0.95, 0.42, 0.34) * (wrap * 0.30 + back * 0.55);
   float thin = 1.0 - smoothstep(0.0, 0.55, NdotV); // grazing angles are thin
-  colour += sss * uLightColour * thin * 0.8;
+  colour += sss * uLightColour * thin * 0.35;
 
   // The water between the fish and the eye takes some of the light out.
   float distanceThroughWater = length(vWorldPos - (vWorldPos + vView * 0.0));
@@ -327,6 +411,7 @@ uniform float uTime;
 out vec4 fragColour;
 
 void main() {
+  if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
   vec3 N = normalize(vNormal);
   vec3 V = normalize(vView);
   vec3 L = normalize(uLightDir);
@@ -373,11 +458,8 @@ void main() {
     (vWorldPos.x + uCausticsExtent.x) / (2.0 * uCausticsExtent.x),
     (vWorldPos.z + uCausticsExtent.y) / uCausticsExtent.y
   );
-  float caustic = texture(uCaustics, cuv).r;
   float depthBelow = max(0.0, uWaterY - vWorldPos.y);
-  caustic *= exp(-depthBelow * 1.5);
-
-  vec3 lit = uLightColour * (1.0 + caustic * 2.0);
+  vec3 lit = uLightColour * causticLight(texture(uCaustics, cuv).r, 0.75 * exp(-depthBelow * 1.5));
   vec3 colour = tint * (NdotL * lit * 0.55 + uAmbient);
   colour += tint * through * (backlight * 2.6 + 0.35) * lit;
   colour += iridescence * sheen * (lit * 0.4 + uAmbient);
@@ -413,6 +495,7 @@ uniform float uTime;
 out vec4 fragColour;
 
 void main() {
+  if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
   vec3 N = normalize(vNormal);
   vec3 V = normalize(vView);
   vec3 L = normalize(uLightDir);
@@ -449,11 +532,11 @@ void main() {
     (vWorldPos.x + uCausticsExtent.x) / (2.0 * uCausticsExtent.x),
     (vWorldPos.z + uCausticsExtent.y) / uCausticsExtent.y
   );
-  float caustic = texture(uCaustics, cuv).r;
   float depthBelow = max(0.0, uWaterY - vWorldPos.y);
-  caustic *= exp(-depthBelow * 1.2) * smoothstep(-0.2, 0.5, N.y);
-
-  vec3 lit = uLightColour * (NdotL + caustic * 2.6);
+  float underWater = step(vWorldPos.y, uWaterY);
+  vec3 lit = uLightColour * NdotL
+    * causticLight(texture(uCaustics, cuv).r,
+                   0.9 * underWater * exp(-depthBelow * 1.2) * smoothstep(-0.2, 0.5, N.y));
   vec3 colour = albedo * (lit + uAmbient);
 
   // Leaves are thin enough to glow when the light is behind them.
@@ -635,10 +718,10 @@ in vec3 vView;
 
 uniform sampler2D uScene;
 uniform sampler2D uCaustics;
+uniform sampler2D uReflection;   // the scene from the mirrored camera
 uniform vec2 uViewport;
 uniform float uWaterY;
 uniform vec2 uCausticsExtent;
-uniform vec3 uSkyColour;
 uniform float uTime;
 
 out vec4 fragColour;
@@ -668,11 +751,19 @@ void main() {
   vec2 offset = N.xz * (fromBelow ? 0.14 : 0.055);
   vec3 refracted = texture(uScene, clamp(screenUV + offset, vec2(0.001), vec2(0.999))).rgb;
 
-  // Reflection. Looking down from above, mostly the room; from underneath, the
-  // surface is a mirror past the critical angle, which is the single most
-  // striking thing about being under water and is almost never rendered.
+  // Reflection: a planar reflection, rendered from the camera mirrored in the
+  // water plane. For a flat mirror the reflected image at a pixel is exactly
+  // what the mirrored camera sees at that pixel, so this is not an
+  // approximation; the ripple normal then nudges the lookup, which is one.
+  // Where the reflection pass drew nothing (alpha 0) the room fills in: from
+  // above, that is the hood lamp and the ceiling; from underneath, the surface
+  // is a mirror past the critical angle and shows the tank back to itself —
+  // the single most striking thing about being under water, and almost never
+  // rendered.
   vec3 R = reflect(-V, N);
-  vec3 reflected = mix(uSkyColour * 0.6, uSkyColour, clamp(R.y * 0.5 + 0.5, 0.0, 1.0));
+  vec2 reflUV = clamp(screenUV + N.xz * 0.06, vec2(0.001), vec2(0.999));
+  vec4 reflTex = texture(uReflection, reflUV);
+  vec3 reflected = mix(envColour(vWorldPos, R), reflTex.rgb, reflTex.a);
   float reflectance = F;
   if (fromBelow) {
     // Total internal reflection beyond the critical angle, 48.6 degrees for
@@ -735,18 +826,31 @@ void main() {
     return;
   }
 
-  vec3 world = worldFromDepth(vUV, depth);
-  vec3 toEye = uCameraPos - world;
-  float pathLength = length(toEye);
-  vec3 dir = toEye / max(1e-5, pathLength);
+  // The depth buffer holds *apparent* positions — geometry under water was
+  // drawn where refraction makes it appear (see SCENE_VERT). The line of sight
+  // is the same line either way, so the true position is recovered by undoing
+  // the shortening along it, from where the ray enters the water.
+  vec3 apparent = worldFromDepth(vUV, depth);
+  vec3 toEye = uCameraPos - apparent;
+  float apparentLength = length(toEye);
+  vec3 dir = toEye / max(1e-5, apparentLength);
 
-  // Only the part of the path that is actually under water counts.
-  float underwater = pathLength;
-  if (uCameraPos.y > uWaterY && world.y < uWaterY) {
-    underwater = pathLength * (uWaterY - world.y) / max(1e-5, uCameraPos.y - world.y);
-  } else if (uCameraPos.y > uWaterY) {
-    underwater = 0.0;
+  // The ray's passage through the water box, as distances from the eye.
+  vec3 rd = -dir + vec3(equal(dir, vec3(0.0))) * 1e-7;
+  vec3 t0 = (uWaterMin - uCameraPos) / rd;
+  vec3 t1 = (uWaterMax - uCameraPos) / rd;
+  float tEnter = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), min(t0.z, t1.z));
+  float tExit = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), max(t0.z, t1.z));
+  bool eyeInside = all(greaterThan(uCameraPos, uWaterMin)) && all(lessThan(uCameraPos, uWaterMax));
+
+  float underwater = 0.0;
+  if (eyeInside) {
+    underwater = min(apparentLength, max(0.0, tExit));
+  } else if (tExit > tEnter && tEnter > 0.0 && apparentLength > tEnter) {
+    // Inside the box the apparent path is the true path over the index.
+    underwater = (apparentLength - tEnter) * max(1.0, uRefractIOR);
   }
+
 
   vec3 T = transmittance(underwater);
 
@@ -820,12 +924,31 @@ precision highp float;
 in vec3 aPosition;
 in vec2 aUV;
 uniform mat4 uViewProjection;
+uniform vec3 uCameraPos;
+uniform vec3 uWaterMin;
+uniform vec3 uWaterMax;
+uniform float uRefractIOR;
 out vec2 vUV;
 out vec3 vWorldPos;
+// Same apparent-depth shift as the scene geometry; see SCENE_VERT.
+vec3 apparentPosition(vec3 p) {
+  if (uRefractIOR <= 1.0) return p;
+  bool eyeInside = all(greaterThan(uCameraPos, uWaterMin)) && all(lessThan(uCameraPos, uWaterMax));
+  bool pointInside = all(greaterThanEqual(p, uWaterMin - 1e-4)) && all(lessThanEqual(p, uWaterMax + 1e-4));
+  if (eyeInside || !pointInside) return p;
+  vec3 d = p - uCameraPos;
+  d += vec3(equal(d, vec3(0.0))) * 1e-7;
+  vec3 t0 = (uWaterMin - uCameraPos) / d;
+  vec3 t1 = (uWaterMax - uCameraPos) / d;
+  vec3 tn = min(t0, t1);
+  float tEnter = clamp(max(max(tn.x, tn.y), tn.z), 0.0, 1.0);
+  vec3 q = uCameraPos + d * tEnter;
+  return q + (p - q) / uRefractIOR;
+}
 void main() {
   vUV = aUV;
   vWorldPos = aPosition;
-  gl_Position = uViewProjection * vec4(aPosition, 1.0);
+  gl_Position = uViewProjection * vec4(apparentPosition(aPosition), 1.0);
 }
 `;
 

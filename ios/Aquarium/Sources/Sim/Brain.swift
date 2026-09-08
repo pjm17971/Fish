@@ -142,6 +142,8 @@ final class FishBrain {
     private var strikeTimer: Double = 0
     private var inspectTimer: Double = 0
     private var restTarget = Vec3.zero
+    /// The tail-beat frequency commanded last tick, for the effort model.
+    private var lastCommandFrequency: Double = 0
     private var yawRateFiltered: Double = 0
     private var pitchRateFiltered: Double = 0
 
@@ -298,9 +300,12 @@ final class FishBrain {
 
     private func updateDrives(_ loco: FishLocomotion, _ dt: Double) {
         let ts = cfg.timeScale
-        let speedSL = loco.speedSL
-        // Effort, normalised so a brisk cruise is about 1.
-        let effort = saturate(speedSL / 3)
+        // Effort, from what the muscles are doing rather than from how fast the
+        // fish happens to be moving: a fish bounced off the glass is moving fast
+        // and working not at all. The tail beat is the muscle's own clock; a
+        // brisk cruise is about three beats a second.
+        let beat = lastCommandFrequency
+        let effort = saturate(beat / 3)
 
         drives.hunger = saturate(
             drives.hunger + Drives.hungerRate * (1 + Drives.hungerActivityGain * effort) * dt * ts)
@@ -324,7 +329,9 @@ final class FishBrain {
         // ordinary cruising speed means the fish accrues fatigue whenever it moves
         // at all: it saturates, `rest` wins permanently, and the fish lies on the
         // bottom and never surfaces for air again.
-        let burst = max(0, speedSL - Drives.aerobicSpeedSL)
+        // In beats per second: four body lengths a second is about 4.3 Hz on
+        // this fish, and a collision cannot be mistaken for a sprint.
+        let burst = max(0, beat - Drives.aerobicBeatHz)
         let flaring = intention == .flare ? Drives.fatigueFlareGain : 0
         drives.fatigue = saturate(
             drives.fatigue + (Drives.fatigueSpeedGain * burst * burst * burst + flaring * 0.01) * dt * ts)
@@ -503,7 +510,8 @@ final class FishBrain {
             goal.target = loco.position + p.wallAway * 0.12
             goal.target.y = clampd(goal.target.y, Tank.floorY + 0.02, Tank.waterY - 0.01)
             goal.speedSL = 1.6
-            goal.urgency = saturate(1 - p.wallDistance / Intent.wallAvoidDistance)
+            // A wall is not a predator: a swerve, not a burst.
+            goal.urgency = 0.5 * saturate(1 - p.wallDistance / Intent.wallAvoidDistance)
             goal.finSpread = 0.6
 
         case .escape:
@@ -741,13 +749,26 @@ final class FishBrain {
             goal.target += p.wallAway * strength
         }
 
+        // Whatever a routine asked for, the place to go is inside the tank; a
+        // target beyond the glass presses the fish against the pane.
+        goal.target.x = clampd(goal.target.x, Tank.minX + 0.03, Tank.maxX - 0.03)
+        goal.target.z = clampd(goal.target.z, Tank.minZ + 0.03, -0.03)
+        goal.target.y = clampd(goal.target.y, Tank.floorY + 0.02, Tank.waterY - 0.004)
+
         let toTarget = goal.target - loco.position
         let distance = lengthSafe(toTarget)
         let desired = distance > 1e-6 ? toTarget / distance : v3(0, 0, 1)
 
-        // Heading error in the fish's own frame: +x is its right, +y its up.
+        // Heading error in the fish's own frame. The frame is right-handed with
+        // +z forward and +y up, which puts +x on the fish's *left*; the signs
+        // below were set by measurement, not from the labels.
         let local = rotateInverse(loco.orientation, desired)
-        let yawError = atan2(local.x, max(1e-4, local.z))
+        // Heading error in the horizontal plane, and only when there is a
+        // horizontal component worth turning for: a target nearly straight above
+        // or below needs pitch, not yaw. Clamping the forward component read a
+        // pellet overhead as ninety degrees to one side.
+        let horizontal = hypot(local.x, local.z)
+        let yawError = horizontal > 0.25 ? atan2(local.x, local.z) : 0
         let pitchError = asin(clampd(local.y, -1, 1))
 
         // Low-pass the rate feedback. Feeding back the raw instantaneous turn rate
@@ -767,13 +788,24 @@ final class FishBrain {
         // hard as it can the other way, and circles its target forever without
         // ever closing on it.
         let turnGain = 1.35 * (0.65 + 0.35 * goal.urgency)
-        cmd.bend = clampd(-turnGain * yawError - 0.035 * yawRateFiltered, -1, 1)
+        // Positive bend turns the fish towards +x when the tail is driving —
+        // measured. With the sign the other way the fish turned away from its
+        // target whenever the tail ran.
+        cmd.bend = clampd(turnGain * yawError - 0.035 * yawRateFiltered, -1, 1)
 
-        // Depth is held two ways, on very different timescales. The swim bladder
-        // is slow — several seconds end to end — and does the steady-state work;
-        // the pectorals are immediate and do the manoeuvring, by angling the fish
-        // so its own forward motion carries it up or down.
-        cmd.bladder = clampd(pitchError * 2.2, -1, 1)
+        // Depth is held two ways, on very different timescales.
+        //
+        // The swim bladder is a trim tank. It drifts slowly towards whatever
+        // makes the fish neutrally buoyant at the depth it wants to be, and it
+        // is driven by the *height* error, not the pitch error: it has no
+        // business responding to which way the nose is pointing. An earlier
+        // version fed it the pitch error at a gain that made it the strongest
+        // vertical force the fish had, and the fish rose and sank on its bladder
+        // with the tail switched off.
+        let heightError = goal.target.y - loco.position.y
+        cmd.bladder = clampd(heightError / 0.03, -1, 1)
+        // The manoeuvring is done by swimming: the body pitches and the
+        // pectorals angle, and forward motion carries the fish up or down.
         cmd.pitchBend = clampd(
             pitchError * 1.6 * (0.6 + 0.4 * goal.urgency) - 0.03 * pitchRateFiltered, -1, 1)
         // The pectorals are the elevators and do most of the work: the body's own
@@ -790,17 +822,38 @@ final class FishBrain {
         // which is exactly what a real fish does in a confined space. At walking
         // pace it can pivot almost on the spot with its pectorals.
         let turnPenalty = 1 - 0.75 * saturate(abs(yawError) / 1.1)
-        let speedError = goal.speedSL * turnPenalty - loco.speedSL
+        // Forward speed, not total speed. Sinking is not swimming.
+        let speedError = goal.speedSL * turnPenalty - loco.forwardSpeedSL
 
-        if goal.hover || goal.speedSL < Fish.pectoralOnlySpeedSL {
+        // A large turn is made on the spot, not on the move: see the pivot
+        // branch below.
+        let pivoting = abs(yawError) > 0.85
+
+        if pivoting {
+            // A tail scull: a slow beat at full asymmetry with the body curled,
+            // pectorals folded, brakes on. Three beats a second with half the
+            // reflex range of curl measured best: about thirty degrees a second
+            // on a ten-centimetre radius. The water the flanks and fins must
+            // shove sideways to rotate is thirty-five times the fish's own yaw
+            // inertia, and that is what sets the rate.
+            cmd.frequency = expApproach(cmd.frequency, 3.0, rate: 6, dt: dt)
+            cmd.amplitude = Fish.standardLength * Fish.tailAmplitudeRatio
+            cmd.pectoralLeft = expApproach(cmd.pectoralLeft, 0, rate: 4, dt: dt)
+            cmd.pectoralRight = expApproach(cmd.pectoralRight, 0, rate: 4, dt: dt)
+            cmd.brake = expApproach(cmd.brake, 0.8, rate: 8, dt: dt)
+        } else if goal.hover || goal.speedSL < Fish.pectoralOnlySpeedSL {
             // Slow work is done with the pectorals, which is what a hovering betta
             // actually uses. The tail stops.
             cmd.frequency = expApproach(cmd.frequency, 0, rate: 6, dt: dt)
+            // No body bend while pivoting: a C-bend at a standstill is a C-start,
+            // and the recoil kicks the head the other way. The pectorals turn.
+            cmd.bend = expApproach(cmd.bend, 0, rate: 8, dt: dt)
             let base = clampd(1.6 + speedError * 2.5, 0.4, Fish.maxPectoralHz)
             // Differential beat turns the fish on the spot and lets it back up —
             // bettas can swim backwards, and this falls out without extra
             // machinery.
-            let diff = clampd(-yawError * 1.4 - 0.03 * yawRateFiltered, -1, 1)
+            // Rowing the fin on the -x side (index 0) yaws the fish towards +x.
+            let diff = clampd(yawError * 1.4 - 0.03 * yawRateFiltered, -1, 1)
             cmd.pectoralLeft = clampd(base * (1 + diff), 0, Fish.maxPectoralHz)
             cmd.pectoralRight = clampd(base * (1 - diff), 0, Fish.maxPectoralHz)
             cmd.amplitude = Fish.standardLength * Fish.tailAmplitudeRatio * 0.4
@@ -811,8 +864,11 @@ final class FishBrain {
             cmd.frequency = clampd(cmd.frequency + rate * speedError * dt, 0, Fish.maxTailBeatHz)
             // Keep a slow beat going: the fins have to stay extended to work as
             // elevators.
-            cmd.pectoralLeft = expApproach(cmd.pectoralLeft, 0.5, rate: 4, dt: dt)
-            cmd.pectoralRight = expApproach(cmd.pectoralRight, 0.5, rate: 4, dt: dt)
+            // Fold the pectorals: a cruising betta lays them along its flanks, and
+            // folded they are edge-on to the flow and act as elevators. Kept
+            // half-open and beating they were a dive plane.
+            cmd.pectoralLeft = expApproach(cmd.pectoralLeft, 0, rate: 4, dt: dt)
+            cmd.pectoralRight = expApproach(cmd.pectoralRight, 0, rate: 4, dt: dt)
             // Amplitude is nearly constant in real steady swimming — fish change
             // speed by changing frequency — and only opens up in a burst.
             let burst = intention == .escape
@@ -821,9 +877,12 @@ final class FishBrain {
         }
 
         // Brake when going faster than intended, and hard when much faster.
-        cmd.brake = expApproach(cmd.brake, saturate(-speedError * 0.8), rate: 14, dt: dt)
+        if !pivoting { cmd.brake = expApproach(cmd.brake, saturate(-speedError * 0.8), rate: 14, dt: dt) }
 
-        cmd.agility = goal.urgency
+        // A pivot gets half the reflex range of body curl: the camber is what
+        // points the tail's push sideways instead of backwards.
+        // A quarter of the reflex range of curl in a pivot; more is a C-start.
+        cmd.agility = intention == .escape ? goal.urgency : (pivoting ? 0.25 : goal.urgency)
         cmd.finSpread = expApproach(cmd.finSpread, goal.finSpread, rate: 3.5, dt: dt)
         cmd.gillFlare = expApproach(cmd.gillFlare, goal.gillFlare, rate: 5, dt: dt)
         cmd.mouthOpen = expApproach(cmd.mouthOpen, goal.mouthOpen, rate: 18, dt: dt)
@@ -852,6 +911,7 @@ final class FishBrain {
                 drives.aggression + percepts.rivalVisible * 0.55 * dt * cfg.timeScale)
         }
 
+        lastCommandFrequency = cmd.frequency
         updateDrives(loco, dt)
         arbitrate(loco, dt)
         runRoutine(loco, water, dt)

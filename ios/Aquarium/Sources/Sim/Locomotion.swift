@@ -158,6 +158,10 @@ final class FishLocomotion {
     var speed: Double { lengthSafe(velocity) }
     /// Speed in body lengths per second — the unit fish biology is written in.
     var speedSL: Double { speed / morphology.standardLength }
+    /// Forward speed in body lengths per second: what the steering compares
+    /// against its target. Total speed is the wrong quantity there — a fish
+    /// sinking at one body length a second is not swimming.
+    var forwardSpeedSL: Double { forwardSpeed / morphology.standardLength }
 
     /// Outside contributors add world-space force at a world point.
     func applyForce(_ force: Vec3, at worldPoint: Vec3) {
@@ -376,7 +380,10 @@ final class FishLocomotion {
             }
 
             let spread = 0.55 + 0.45 * cmd.finSpread
-            let pose = pectoralPose(phase: phase, side: side, spread: spread, pitchBias: cmd.pectoralPitch)
+            // Fully out by one beat a second, folded flat along the flank when still.
+            let rowing = min(1, freq / 1.0)
+            let pose = pectoralPose(phase: phase, side: side, spread: spread,
+                                    pitchBias: cmd.pectoralPitch, rowing: rowing)
 
             // Blade centre, half a span out from the attachment along the blade.
             let cs = cos(pose.sweep)
@@ -385,7 +392,7 @@ final class FishLocomotion {
             let bladeCentreLocal = body.pectoralAttach(side: side) + bladeDir * (Pectoral.span * 0.5)
 
             // Blade velocity from the sweep, in the body frame.
-            let dSweep = 2 * Double.pi * freq * Pectoral.sweepAmp * spread * cos(phase)
+            let dSweep = 2 * Double.pi * freq * pose.dSweepDPhase
             let bladeVelLocal = v3(
                 side * -ss * dSweep * Pectoral.span * 0.5,
                 0,
@@ -405,8 +412,13 @@ final class FishLocomotion {
             let dvn = clampd((vn - prev) * invDt, -40, 40)
             if s == 0 { prevPecVnL = vn } else { prevPecVnR = vn }
 
-            let fn = -maBlade * dvn
-                - 0.5 * RHO_WATER * Fish.crossFlowCd * Pectoral.area * abs(vn) * vn
+            // Drag only: the reactive part of a paddle stroke nets to nothing over a
+            // cycle, and the scalar added-mass form does not when the normal rotates
+            // with the feathering — it produced a steady lift several times the
+            // drag thrust. Kept on the body, where the normal does not rotate.
+            _ = dvn
+            _ = maBlade
+            let fn = -0.5 * RHO_WATER * Fish.crossFlowCd * Pectoral.area * abs(vn) * vn
             let f = bladeN * fn
             forces.pectoral += f
             F += f
@@ -444,6 +456,16 @@ final class FishLocomotion {
             let cRot = 0.5 * RHO_WATER * Fish.crossFlowCd * rotationalDragFactor
             T += angularVelocity * (-cRot * wl)
         }
+        // The viscous part, linear in the rate, which is what actually stops a
+        // slow spin. Applied in the body frame so each axis is damped against
+        // its own inertia.
+        do {
+            let inertia = morphology.effectiveInertiaBody
+            let k = 1 / Fish.rotationalViscousTau
+            let wBody = rotateInv(orientation, angularVelocity)
+            let tBody = v3(-inertia.0 * k * wBody.x, -inertia.1 * k * wBody.y, -inertia.2 * k * wBody.z)
+            T += rotate(orientation, tBody)
+        }
     }
 
     private func accumulateContact(_ F: inout Vec3) {
@@ -454,8 +476,11 @@ final class FishLocomotion {
         // Spring-damper rather than positional correction: a hard reposition
         // injects energy and is what makes a bumped fish jitter against a wall.
         guard let b = bounds else { return }
-        let k: Double = 240   // N/m
-        let c: Double = 0.9   // N.s/m
+        // Soft, because the fish is: a fast cruise into the glass stops over
+        // about five millimetres. 240 N/m flung the fish across the tank at
+        // twelve body lengths a second every time it fed at the front.
+        let k = 12.0
+        let c = 0.3
         // The margin covers the fish's *reach*, not its girth: the centre of mass
         // sits roughly two centimetres behind the snout, so half the body depth
         // let the head poke through the glass while the centre was still inside.

@@ -93,7 +93,7 @@ To run the tests:
 
 ```sh
 cd preview
-npm test           # 38 tests
+npm test           # 41 tests
 ```
 
 ---
@@ -158,6 +158,12 @@ says the same thing in thirty lines.
 Stated plainly, because the brief was "don't fake it" and that has to include
 saying what is faked or missing.
 
+**This was watched, late.** For a long time every test passed and the fish
+bobbed up and down on the spot, turned away from its targets, and could not
+turn round. `docs/SIMULATION-SPEC.md` §0 lists the eight things that were
+wrong, all of the kind that pass a test and fail an eye. The tests now include
+one that asks where the fish went.
+
 **The Swift code has never been compiled.** It was written in an environment with
 no Swift toolchain — Linux, no Xcode. Every constant has been checked against the
 TypeScript version programmatically, every shader entry point and uniform field
@@ -172,6 +178,18 @@ through the tank is nearly, but not exactly, what you would see if the phone wer
 a hole. At arm's length, against a room a few metres away, the error is a few
 degrees. It would matter for something close behind the phone. Fixing it properly
 needs depth and a reprojection.
+
+**Turning is slow.** A routine turn on the spot runs at about 20 degrees a
+second on a radius near 10 cm, in a tank 35 cm wide. That is set by physics the
+model gets right: the fish's own yaw inertia is small, but the water its flanks
+and 5 cm fins must shove sideways to rotate is thirty-five times larger. Real
+long-finned bettas are sluggish turners for the same reason, though not quite
+this sluggish; the difference is that a real one bends further into the turn
+than this model's routine turn allows itself.
+
+**Strikes are fast.** The lunge at a pellet briefly reaches eight to twelve body
+lengths a second. Real suction strikes are fast too, but this is at the upper
+end and it shows.
 
 **The swimmer is about 15 to 20 per cent too efficient.** There is no
 vortex-shedding loss in the model and the boundary layer is treated as entirely

@@ -35,4 +35,5 @@ build`. Several of them run a long simulated time and take a minute or two.
 | `probe-surface` | the approach to the surface, mouth height against water height |
 | `probe-finmesh` | the fin *render* meshes: bounding box, longest triangle edge. Written to tell a simulation bug from a rendering one, which it did |
 | `probe-finspan` | each fin's chord, span and link lengths, against the shape it is supposed to be |
+| `probe-trace` | two minutes of ordinary life at real speed: position, intention, speed and muscle commands every two seconds, then the fraction of the path that was vertical and the time spent in each intention. The probe that finally showed the bobbing; run it first when the fish looks wrong |
 | `timing.mjs` | milliseconds per simulated step, broken down by subsystem |

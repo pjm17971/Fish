@@ -156,7 +156,9 @@ func amplitudeEnvelope(_ s: Double) -> Double {
 /// follows the *rate* of deformation, every reversal of the steering controller
 /// then throws the fish across the tank.
 func bendShape(_ s: Double) -> Double {
-    amplitudeEnvelope(s) * Fish.bendScale + Fish.bendCamber * pow(s, 1.6)
+    // The camber of the whole body into a turn; the asymmetric beat rides the
+    // wave and is handled in the body shape itself.
+    Fish.bendCamber * pow(s, 1.6)
 }
 
 func buildMorphology() -> Morphology {

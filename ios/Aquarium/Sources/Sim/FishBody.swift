@@ -194,7 +194,13 @@ final class FishBody {
             // the fin's trailing edge the biggest-amplitude part of the animal.
             let s = arc / L
             let env = amplitudeEnvelope(s) * actualAmplitude
-            let h = env * sin(k * arc - wavePhase) + actualBend * bendShape(s) * bendGain
+            let theta = k * arc - wavePhase
+            let wave = sin(theta)
+            let steer = actualBend * bendGain
+            // The ordinary wave; the same wave beaten harder to one side (sin^2 is
+            // one-signed and largest at the extremes: an amplitude asymmetry, not
+            // a shift); and the camber of the whole body into the turn.
+            let h = env * wave + steer * (Fish.bendAsymmetry * env * wave * wave + bendShape(s))
             denseX[j] = h
             // Vertical bend. Gentler than the lateral one — a fish is far stiffer
             // in that plane, which is why it turns much more readily than it
@@ -342,7 +348,10 @@ final class FishBody {
             break
         }
         let seg = segments[idx]
-        return seg.pos + seg.normal * (side * segs[idx].width * 0.5)
+        // The segment normal points towards -x on a straight body and the blade
+        // extends towards +x for side = +1; this sign puts the root on the same
+        // side as the blade, so the fin has a lever arm about the yaw axis.
+        return seg.pos + seg.normal * (-side * segs[idx].width * 0.5)
     }
 }
 
@@ -358,19 +367,35 @@ struct PectoralPose {
     var sweep: Double = 0
     var pitch: Double = 0
     var normal: Vec3 = .zero
+    var dSweepDPhase: Double = 0
 }
 
-func pectoralPose(phase: Double, side: Double, spread: Double) -> PectoralPose {
+func pectoralPose(phase: Double, side: Double, spread: Double, pitchBias: Double,
+                  rowing: Double) -> PectoralPose {
     var p = PectoralPose()
-    p.sweep = Pectoral.sweepMean + Pectoral.sweepAmp * spread * sin(phase)
-    p.pitch = Pectoral.pitchAmp * spread * sin(phase + Pectoral.pitchPhase)
+    // Folded back along the flank when still; out and rowing when beating. The
+    // sweep angle increasing means the fin moving backwards: the power stroke.
+    let fold = 1 - rowing
+    p.sweep = Pectoral.sweepFolded * fold
+        + rowing * (Pectoral.sweepMean + Pectoral.sweepAmp * spread * sin(phase))
+    // Feathering: flat through the power stroke (phase near 0), edge-on through
+    // the recovery (phase near pi). The steady tilt rides on top of it.
+    let feather = rowing * Pectoral.pitchAmp * 0.5 * (1 - cos(phase))
+    // Positive bias is nose-up. Sign by measurement.
+    p.pitch = feather - pitchBias * 0.55
+    p.dSweepDPhase = rowing * Pectoral.sweepAmp * spread * cos(phase)
 
-    // Fin blade normal in the body frame: the blade sweeps about the dorsal axis
-    // and feathers about its own span.
+    // Fin blade normal in the body frame. The span runs outwards at the sweep
+    // angle, (side*cs, 0, -ss); the blade is a paddle standing on that span,
+    // so its normal is span x up, tilted about the span by the feather angle.
+    // It was once set *along* the span, which made the paddle move edge-on and
+    // produce no force at all.
     let cs = cos(p.sweep)
     let ss = sin(p.sweep)
     let cp = cos(p.pitch)
     let sp = sin(p.pitch)
-    p.normal = normalizeSafe(v3(side * cs * cp, sp, -ss * cp), fallback: v3(side, 0, 0))
+    // The tilt about the span mirrors with the side, or the two fins' vertical
+    // forces have opposite signs and every turn becomes a climb.
+    p.normal = normalizeSafe(v3(ss * cp, side * sp, side * cs * cp), fallback: v3(0, 0, side))
     return p
 }

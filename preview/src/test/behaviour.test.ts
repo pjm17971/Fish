@@ -108,6 +108,39 @@ test('an uneven frame rate does not break anything', () => {
   finite('at the end');
 });
 
+test('the fish swims about rather than bobbing on the spot', () => {
+  // The single most visible failure this simulation ever had: for a long time
+  // eighty to ninety per cent of the distance the fish covered was vertical.
+  // It rose and sank on its swim bladder with the tail switched off, and when
+  // it did try to go somewhere it turned away from its target because the
+  // steering sign was wrong, and it could not turn round at all because the
+  // only turning it had needed water flowing past. None of that showed in a
+  // test, because none of the tests asked where the fish went.
+  //
+  // Two minutes of ordinary life at real speed, with no food and nothing to
+  // react to. It should get about; mostly sideways.
+  const world = new World({ seed: 7, timeScale: 1 });
+  let last = { ...world.locomotion.position };
+  let path = 0;
+  let vertical = 0;
+  let minX = Infinity;
+  let maxX = -Infinity;
+  run(world, 120, () => {
+    const p = world.locomotion.position;
+    path += Math.hypot(p.x - last.x, p.y - last.y, p.z - last.z);
+    vertical += Math.abs(p.y - last.y);
+    last = { ...p };
+    minX = Math.min(minX, p.x);
+    maxX = Math.max(maxX, p.x);
+  });
+  assert.ok(path > 4, `the fish covered only ${path.toFixed(2)} m in two minutes`);
+  assert.ok(
+    vertical / path < 0.35,
+    `${((100 * vertical) / path).toFixed(0)}% of the fish's movement was vertical; it is bobbing`,
+  );
+  assert.ok(maxX - minX > 0.15, `the fish only ranged ${((maxX - minX) * 1000).toFixed(0)} mm across the tank`);
+});
+
 test('the fish does not dither between intentions', () => {
   // A plain argmax over competing desires produces a fish that flickers between
   // two nearly equal options many times a second, which is the single most
