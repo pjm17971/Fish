@@ -152,6 +152,7 @@ final class FishLocomotion {
     func forward() -> Vec3 { rotate(orientation, v3(0, 0, 1)) }
     func dorsal() -> Vec3 { rotate(orientation, v3(0, 1, 0)) }
     func right() -> Vec3 { rotate(orientation, v3(1, 0, 0)) }
+    func up() -> Vec3 { rotate(orientation, v3(0, 1, 0)) }
 
     /// Forward speed along the body axis, not the speed of the CoM through space.
     var forwardSpeed: Double { simd_dot(velocity, forward()) }
@@ -212,7 +213,7 @@ final class FishLocomotion {
         // Recoil from internal deformation, rotated into world space.
         T += rotate(orientation, body.recoilTorque)
 
-        accumulateContact(&F)
+        accumulateContact(&F, &T)
 
         F += externalForce
         T += externalTorque
@@ -468,40 +469,60 @@ final class FishLocomotion {
         }
     }
 
-    private func accumulateContact(_ F: inout Vec3) {
-        // Soft contact with the tank. The brain steers away from walls long
-        // before this fires; this exists so a startled fish that does clip the
-        // glass bounces off rather than passing through.
-        //
-        // Spring-damper rather than positional correction: a hard reposition
-        // injects energy and is what makes a bumped fish jitter against a wall.
+    /// The six points of the fish that reach furthest along its own axes: snout,
+    /// tail-fin tip, dorsal and anal fin edges, and the two pectoral tips. These
+    /// are what the tank has to keep inside it: keeping the centre inside with a
+    /// margin sized for the snout let the tail fin, which reaches nearly twice as
+    /// far the other way, go straight through the pane.
+    func bodyExtremes() -> [Vec3] {
+        let m = morphology
+        let reachForward = m.comArc + 0.002
+        let reachBack = TIP_S * m.standardLength - m.comArc
+        // Fins drape; 60% of their height is what a relaxed fin spans.
+        let reachUp = Fish.maxDepth + 0.6 * Fins.dorsal.extent
+        // Less below than above: the anal fin folds against the substrate.
+        let reachDown = Fish.maxDepth + 0.25 * Fins.anal.extent
+        let reachSide = Fish.maxWidth + Pectoral.span * 0.5
+        let f = forward(), u = up(), r = right()
+        return [position + f * reachForward, position - f * reachBack,
+                position + u * reachUp, position - u * reachDown,
+                position + r * reachSide, position - r * reachSide]
+    }
+
+    private func accumulateContact(_ F: inout Vec3, _ T: inout Vec3) {
+        // Soft contact with the tank, applied at whichever part of the fish is
+        // furthest through each pane, with the torque that implies.
         guard let b = bounds else { return }
         // Soft, because the fish is: a fast cruise into the glass stops over
-        // about five millimetres. 240 N/m flung the fish across the tank at
-        // twelve body lengths a second every time it fed at the front.
+        // about five millimetres. 240 N/m flung the fish across the tank.
         let k = 12.0
         let c = 0.3
-        // The margin covers the fish's *reach*, not its girth: the centre of mass
-        // sits roughly two centimetres behind the snout, so half the body depth
-        // let the head poke through the glass while the centre was still inside.
-        let margin = Fish.maxDepth * 0.5 + Fish.standardLength * 0.30
+        let pts = bodyExtremes()
 
-        func push(_ nx: Double, _ ny: Double, _ nz: Double, _ penetration: Double) {
+        func push(_ n: Vec3, _ point: Vec3, _ penetration: Double) {
             guard penetration > 0 else { return }
-            let vn = velocity.x * nx + velocity.y * ny + velocity.z * nz
-            // Damp only while moving into the wall, so the fish is not sucked back.
+            let rArm = point - position
+            let vPoint = velocity + simd_cross(angularVelocity, rArm)
+            let vn = simd_dot(vPoint, n)
             let damp = vn < 0 ? -c * vn : 0
-            let mag = k * penetration + damp
-            let f = v3(nx * mag, ny * mag, nz * mag)
+            let f = n * (k * penetration + damp)
             forces.contact += f
             F += f
+            // Only the snout transmits a torque: the tail and median fins are
+            // membranes on a compliant peduncle, and a rigid lever arm on the
+            // tail pitched the fish into the sand whenever it brushed the glass.
+            if point == pts[0] { T += simd_cross(rArm, f) }
         }
-
-        push(1, 0, 0, b.minX + margin - position.x)
-        push(-1, 0, 0, position.x - (b.maxX - margin))
-        push(0, 0, 1, b.minZ + margin - position.z)
-        push(0, 0, -1, position.z - (b.maxZ - margin))
-        push(0, 1, 0, b.floorY + margin - position.y)
+        func deepest(_ score: (Vec3) -> Double) -> Vec3 {
+            var best = pts[0]; var bestScore = score(best)
+            for q in pts.dropFirst() { let sc = score(q); if sc > bestScore { bestScore = sc; best = q } }
+            return best
+        }
+        var q = deepest { b.minX - $0.x }; push(v3(1, 0, 0), q, b.minX - q.x)
+        q = deepest { $0.x - b.maxX }; push(v3(-1, 0, 0), q, q.x - b.maxX)
+        q = deepest { b.minZ - $0.z }; push(v3(0, 0, 1), q, b.minZ - q.z)
+        q = deepest { $0.z - b.maxZ }; push(v3(0, 0, -1), q, q.z - b.maxZ)
+        q = deepest { b.floorY - $0.y }; push(v3(0, 1, 0), q, b.floorY - q.y)
     }
 
     private func integrate(_ F: Vec3, _ T: Vec3, dt: Double) {

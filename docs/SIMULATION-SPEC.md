@@ -531,7 +531,17 @@ of porpoising.
 ### 4.8 Contact and damping
 
 The glass is a spring of 12 N/m with 0.3 N.s/m of damping — a fast cruise into
-the pane stops over about five millimetres. Rotation is damped by the cross-flow
+the pane stops over about five millimetres. It acts on the whole fish, not on
+its centre: six points in the body frame (snout 27 mm ahead of the centre of
+mass, tail-fin tip 47 mm behind, dorsal edge 25 mm up, anal edge 19 mm down
+with the fin folded against the substrate, pectoral tips 12 mm out), and the
+push comes from whichever is furthest through each pane. Keeping only the
+centre inside with a margin sized for the snout put the tail through the front
+glass 37 % of the time. Only the snout transmits a torque: the fins are
+membranes on a compliant peduncle, and giving the tail a rigid 47 mm lever arm
+pitched the fish into the sand every time its tail brushed the glass.
+Avoidance senses from the snout and the centre only — sensing from every
+extreme made most of an 8.5 cm deep tank "near a wall". Rotation is damped by the cross-flow
 drag (quadratic) plus a viscous term with a 2.5 s time constant, so a kicked
 fish does not coast in yaw indefinitely but a slow turn is not smothered.
 

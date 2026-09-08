@@ -180,6 +180,7 @@ const SURFACE_REACH = 0.005;
 const SUCTION_SPEED = 0.14;
 
 const scratch = {
+  extremes: [v3(), v3(), v3(), v3(), v3(), v3()] as Vec3[],
   toTarget: v3(),
   desired: v3(),
   fwd: v3(),
@@ -340,11 +341,17 @@ export class FishBrain {
     }
 
     // --- Walls ---
-    const dxMin = loco.position.x - TANK_MIN_X;
-    const dxMax = TANK_MAX_X - loco.position.x;
-    const dzMin = loco.position.z - TANK_MIN_Z;
-    const dzMax = TANK_MAX_Z - loco.position.z;
-    const dyMin = loco.position.y - TANK.floorY;
+    // Distances from the snout and the centre of mass. Avoidance is about
+    // where the fish is going, so the front of it is what matters; the tail
+    // and fins are the contact model's business. Sensing from every extreme of
+    // the body was tried and made most of an 8.5 cm deep tank "near a wall":
+    // avoidance fired a hundred and forty times in two minutes.
+    const snout = loco.bodyExtremes(scratch.extremes)[0];
+    const dxMin = Math.min(loco.position.x, snout.x) - TANK_MIN_X;
+    const dxMax = TANK_MAX_X - Math.max(loco.position.x, snout.x);
+    const dzMin = Math.min(loco.position.z, snout.z) - TANK_MIN_Z;
+    const dzMax = TANK_MAX_Z - Math.max(loco.position.z, snout.z);
+    const dyMin = Math.min(loco.position.y, snout.y) - TANK.floorY;
 
     // The water surface is deliberately not in this list.
     //
@@ -984,7 +991,8 @@ export class FishBrain {
     // the pane until the contact model throws it back.
     g.target.x = clamp(g.target.x, TANK_MIN_X + 0.03, -TANK_MIN_X - 0.03);
     g.target.z = clamp(g.target.z, TANK_MIN_Z + 0.03, -0.03);
-    g.target.y = clamp(g.target.y, TANK.floorY + 0.02, TANK.waterY - 0.004);
+    // The centre of mass cannot go lower than the anal fin allows.
+    g.target.y = clamp(g.target.y, TANK.floorY + 0.026, TANK.waterY - 0.004);
 
     sub(scratch.toTarget, g.target, loco.position);
     const distance = len(scratch.toTarget);

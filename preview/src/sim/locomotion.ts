@@ -59,8 +59,9 @@ import {
   TANK_MAX_X,
   TANK_MIN_Z,
   TANK_MAX_Z,
+  FINS,
 } from './config.js';
-import { Morphology } from './morphology.js';
+import { TIP_S, Morphology } from './morphology.js';
 import { FishBody, MotorCommand, pectoralPose } from './fishBody.js';
 import { WaterSurface, BulkFlow } from './water.js';
 
@@ -76,6 +77,10 @@ export interface ForceBreakdown {
 }
 
 const scratch = {
+  axisF: v3(),
+  axisU: v3(),
+  axisR: v3(),
+  extremes: [v3(), v3(), v3(), v3(), v3(), v3()] as Vec3[],
   worldPos: v3(),
   worldVel: v3(),
   rel: v3(),
@@ -128,6 +133,10 @@ interface SegmentWork {
   /** Tangential velocity relative to the water. */
   vt: number;
 }
+
+const AXIS_X: Vec3 = v3(1, 0, 0);
+const AXIS_Y: Vec3 = v3(0, 1, 0);
+const AXIS_Z: Vec3 = v3(0, 0, 1);
 
 const pecPose = {
   sweep: 0,
@@ -699,6 +708,43 @@ export class FishLocomotion {
     }
   }
 
+  /**
+   * The six points of the fish that reach furthest along its own axes: snout,
+   * tail-fin tip, dorsal and anal fin edges, and the two pectoral tips. In
+   * world space, from the centre of mass and the current orientation.
+   *
+   * These are what the tank has to keep inside it. Keeping the *centre* inside
+   * with a margin was the first version, and the margin was sized for the
+   * snout; the tail fin reaches nearly twice as far the other way, so a fish
+   * facing away from the glass put its tail straight through the pane, and its
+   * anal fin, which hangs well below the body, went through the sand and
+   * bounced on the spring every time it went near the bottom.
+   */
+  bodyExtremes(out: Vec3[]): Vec3[] {
+    const m = this.morphology;
+    const reachForward = m.comArc + 0.002;
+    const reachBack = TIP_S * m.standardLength - m.comArc;
+    // Fins drape rather than stand out rigidly; 60% of their height is what a
+    // relaxed fin actually spans.
+    const reachUp = FISH.maxDepth + 0.6 * FINS.dorsal.height;
+    // Less below than above: the anal fin folds against the substrate, and a
+    // betta with its fins brushing the sand is a betta at rest, not one in
+    // trouble. Keeping the fin's full drape off the floor made the floor
+    // "near" from most of the water column and the fish avoided it endlessly.
+    const reachDown = FISH.maxDepth + 0.25 * FINS.anal.height;
+    const reachSide = FISH.maxWidth + PECTORAL.span * 0.5;
+    quatRotate(scratch.axisF, this.orientation, AXIS_Z);
+    quatRotate(scratch.axisU, this.orientation, AXIS_Y);
+    quatRotate(scratch.axisR, this.orientation, AXIS_X);
+    addScaled(copy(out[0], this.position), scratch.axisF, reachForward);
+    addScaled(copy(out[1], this.position), scratch.axisF, -reachBack);
+    addScaled(copy(out[2], this.position), scratch.axisU, reachUp);
+    addScaled(copy(out[3], this.position), scratch.axisU, -reachDown);
+    addScaled(copy(out[4], this.position), scratch.axisR, reachSide);
+    addScaled(copy(out[5], this.position), scratch.axisR, -reachSide);
+    return out;
+  }
+
   private accumulateContact(F: Vec3, T: Vec3): void {
     // Soft contact with the tank. The brain steers away from walls long before
     // this fires; this exists so that a startled fish that does clip the glass
@@ -718,29 +764,55 @@ export class FishLocomotion {
     // and over, every time it fed at the front.
     const k = 12; // N/m
     const c = 0.3; // N.s/m, near critical for the fish plus its added mass
-    // The margin has to cover the fish's *reach*, not its girth. The centre of
-    // mass sits roughly two centimetres behind the snout, so a margin of half
-    // the body depth let the head poke straight through the glass while the
-    // centre was still comfortably inside the tank.
-    const margin = FISH.maxDepth * 0.5 + FISH.standardLength * 0.30;
-
-    const push = (nx: number, ny: number, nz: number, penetration: number): void => {
+    // Applied at whichever part of the fish is furthest through each pane,
+    // with the torque that implies: a tail through the glass is pushed back
+    // by the tail, and the fish swings.
+    const pts = this.bodyExtremes(scratch.extremes);
+    // Only the snout transmits a torque. The tail and the median fins are
+    // membranes on a compliant peduncle: they push the fish, they do not
+    // lever it. Giving the tail its full 47 mm lever arm pitched the fish nose
+    // down every time its tail brushed the glass and drove it into the sand,
+    // which read as bouncing off the bottom.
+    const push = (nx: number, ny: number, nz: number, point: Vec3, penetration: number): void => {
       if (penetration <= 0) return;
-      const vn = this.velocity.x * nx + this.velocity.y * ny + this.velocity.z * nz;
+      const withTorque = point === pts[0];
+      sub(scratch.tmp2, point, this.position);
+      cross(scratch.tmp, this.angularVelocity, scratch.tmp2);
+      add(scratch.tmp, scratch.tmp, this.velocity);
+      const vn = scratch.tmp.x * nx + scratch.tmp.y * ny + scratch.tmp.z * nz;
       // Damping only while moving into the wall, so the fish is not sucked back.
       const damp = vn < 0 ? -c * vn : 0;
       const mag = k * penetration + damp;
       set(scratch.tmp, nx * mag, ny * mag, nz * mag);
       add(this.forces.contact, this.forces.contact, scratch.tmp);
       add(F, F, scratch.tmp);
+      if (withTorque) {
+        cross(scratch.r, scratch.tmp2, scratch.tmp);
+        add(T, T, scratch.r);
+      }
     };
-
-    push(1, 0, 0, b.minX + margin - this.position.x);
-    push(-1, 0, 0, this.position.x - (b.maxX - margin));
-    push(0, 0, 1, b.minZ + margin - this.position.z);
-    push(0, 0, -1, this.position.z - (b.maxZ - margin));
-    push(0, 1, 0, b.floorY + margin - this.position.y);
-    void T;
+    const deepest = (score: (q: Vec3) => number): Vec3 => {
+      let best = pts[0];
+      let bestScore = score(best);
+      for (let i = 1; i < pts.length; i++) {
+        const sc = score(pts[i]);
+        if (sc > bestScore) {
+          bestScore = sc;
+          best = pts[i];
+        }
+      }
+      return best;
+    };
+    let q = deepest((pt) => b.minX - pt.x);
+    push(1, 0, 0, q, b.minX - q.x);
+    q = deepest((pt) => pt.x - b.maxX);
+    push(-1, 0, 0, q, q.x - b.maxX);
+    q = deepest((pt) => b.minZ - pt.z);
+    push(0, 0, 1, q, b.minZ - q.z);
+    q = deepest((pt) => pt.z - b.maxZ);
+    push(0, 0, -1, q, q.z - b.maxZ);
+    q = deepest((pt) => b.floorY - pt.y);
+    push(0, 1, 0, q, b.floorY - q.y);
   }
 
   private integrate(F: Vec3, T: Vec3, dt: number): void {

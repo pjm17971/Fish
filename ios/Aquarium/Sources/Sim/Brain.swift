@@ -210,11 +210,16 @@ final class FishBrain {
         }
 
         // --- Walls ---
-        let dxMin = loco.position.x - Tank.minX
-        let dxMax = Tank.maxX - loco.position.x
-        let dzMin = loco.position.z - Tank.minZ
-        let dzMax = Tank.maxZ - loco.position.z
-        let dyMin = loco.position.y - Tank.floorY
+        // Distances from the snout and the centre of mass: avoidance is about
+        // where the fish is going; the tail and fins are the contact model's
+        // business. Sensing from every extreme made most of the tank "near a
+        // wall".
+        let snout = loco.bodyExtremes()[0]
+        let dxMin = min(loco.position.x, snout.x) - Tank.minX
+        let dxMax = Tank.maxX - max(loco.position.x, snout.x)
+        let dzMin = min(loco.position.z, snout.z) - Tank.minZ
+        let dzMax = Tank.maxZ - max(loco.position.z, snout.z)
+        let dyMin = min(loco.position.y, snout.y) - Tank.floorY
 
         // The water surface is deliberately not in this list. It is a boundary but
         // not an obstacle: the fish has to reach it to breathe and to take food
@@ -753,7 +758,7 @@ final class FishBrain {
         // target beyond the glass presses the fish against the pane.
         goal.target.x = clampd(goal.target.x, Tank.minX + 0.03, Tank.maxX - 0.03)
         goal.target.z = clampd(goal.target.z, Tank.minZ + 0.03, -0.03)
-        goal.target.y = clampd(goal.target.y, Tank.floorY + 0.02, Tank.waterY - 0.004)
+        goal.target.y = clampd(goal.target.y, Tank.floorY + 0.026, Tank.waterY - 0.004)
 
         let toTarget = goal.target - loco.position
         let distance = lengthSafe(toTarget)
