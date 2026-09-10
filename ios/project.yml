@@ -1,0 +1,65 @@
+# XcodeGen project definition.
+#
+# The Xcode project file itself is not checked in. A .xcodeproj is a large
+# generated blob that conflicts on nearly every merge and tells a reader almost
+# nothing; this file says the same thing in thirty lines. Generate the project
+# with:
+#
+#     brew install xcodegen        # once
+#     cd ios && xcodegen generate
+#     open Aquarium.xcodeproj
+#
+# If you would rather not install XcodeGen, see README.md — the manual setup is
+# a New Project, a folder drag, and three build settings.
+
+name: Aquarium
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    # ARKit's simultaneous world and face tracking arrived in iOS 13, and it is
+    # what makes the perspective follow your head rather than only the tilt.
+    iOS: "15.0"
+  createIntermediateGroups: true
+  xcodeVersion: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    # The simulation runs at a fixed 250 Hz internally and does a good deal of
+    # floating-point work per step; unchecked arithmetic and whole-module
+    # optimisation together are worth roughly a factor of three over the debug
+    # defaults, which is the difference between fitting in a frame and not.
+    SWIFT_OPTIMIZATION_LEVEL[config=Release]: "-O -whole-module-optimization"
+    MTL_ENABLE_DEBUG_INFO[config=Debug]: INCLUDE_SOURCE
+    MTL_FAST_MATH: YES
+
+targets:
+  Aquarium:
+    type: application
+    platform: iOS
+    sources:
+      - path: Aquarium/Sources
+      - path: Aquarium/Resources
+    info:
+      path: Aquarium/Resources/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.aquarium
+        PRODUCT_NAME: Aquarium
+        SWIFT_OBJC_BRIDGING_HEADER: Aquarium/Sources/Aquarium-Bridging-Header.h
+        # The shaders include their headers by bare name and sit beside them, so
+        # they resolve on their own; this is for the bridging header, which
+        # refers to "Shaders/ShaderTypes.h" from one directory up.
+        HEADER_SEARCH_PATHS: $(SRCROOT)/Aquarium/Sources
+        USER_HEADER_SEARCH_PATHS: $(SRCROOT)/Aquarium/Sources
+        TARGETED_DEVICE_FAMILY: "1"      # iPhone
+        # ARKit will not run in the simulator, and neither will the camera
+        # passthrough that the whole thing is built around.
+        SUPPORTED_PLATFORMS: iphoneos
+        ENABLE_BITCODE: NO
+    dependencies:
+      - sdk: ARKit.framework
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+      - sdk: CoreMotion.framework
+      - sdk: CoreVideo.framework

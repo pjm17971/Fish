@@ -1,0 +1,13 @@
+node_modules/
+preview/node_modules/
+preview/dist/
+*.log
+.DS_Store
+
+# Xcode. The project file is generated from ios/project.yml by XcodeGen, so it
+# is not checked in — see README.md.
+ios/*.xcodeproj
+ios/*.xcworkspace
+DerivedData/
+*.xcuserdatad
+xcuserdata/

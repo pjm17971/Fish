@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Aquarium — simulation preview</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: #07090a;
+        color: #cfd6d4;
+        font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        overflow: hidden;
+      }
+      #view { display: block; width: 100vw; height: 100vh; cursor: grab; }
+      #view:active { cursor: grabbing; }
+      #hud {
+        position: fixed; top: 12px; left: 12px;
+        padding: 12px 14px;
+        background: rgba(6, 10, 11, 0.72);
+        border: 1px solid rgba(150, 190, 180, 0.16);
+        border-radius: 8px;
+        white-space: pre;
+        font-size: 12px;
+        line-height: 1.35;
+        pointer-events: none;
+        backdrop-filter: blur(6px);
+        max-height: calc(100vh - 24px);
+        overflow: hidden;
+      }
+      #toggle {
+        position: fixed; top: 12px; right: 12px;
+        padding: 8px 12px;
+        background: rgba(6, 10, 11, 0.72);
+        border: 1px solid rgba(150, 190, 180, 0.16);
+        border-radius: 8px;
+        color: inherit;
+        font: inherit;
+        font-size: 12px;
+        letter-spacing: 0.02em;
+        cursor: pointer;
+        backdrop-filter: blur(6px);
+        touch-action: manipulation;
+      }
+      #toggle:hover { border-color: rgba(150, 190, 180, 0.4); }
+      #toggle:focus-visible { outline: 2px solid rgba(150, 190, 180, 0.5); outline-offset: 2px; }
+      #help {
+        position: fixed; bottom: 12px; left: 12px;
+        padding: 10px 14px;
+        background: rgba(6, 10, 11, 0.72);
+        border: 1px solid rgba(150, 190, 180, 0.16);
+        border-radius: 8px;
+        white-space: pre;
+        font-size: 12px;
+        pointer-events: none;
+        backdrop-filter: blur(6px);
+      }
+      #error {
+        position: fixed; inset: 0;
+        display: none;
+        padding: 40px;
+        background: #100a0a;
+        color: #ffb4a8;
+        white-space: pre-wrap;
+        overflow: auto;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="view"></canvas>
+    <div id="hud">starting…</div>
+    <button id="toggle" type="button" aria-pressed="true">hide panels</button>
+    <div id="help">drag  orbit
+wheel zoom
+double-click on the water  drop food
+move the pointer near the glass  the fish notices you
+f  feed at the centre     s  startle
+t  speed up physiology    space  pause
+h  hide this panel        ?  hide help</div>
+    <pre id="error"></pre>
+    <script type="module">
+      // Surface errors on the page. A blank canvas with a message only in the
+      // console is a miserable thing to debug.
+      const errBox = document.getElementById('error');
+      const show = (msg) => {
+        errBox.style.display = 'block';
+        errBox.textContent += msg + '\n\n';
+      };
+      window.addEventListener('error', (e) => show(e.error?.stack ?? e.message));
+      window.addEventListener('unhandledrejection', (e) => show(String(e.reason?.stack ?? e.reason)));
+      import('./dist/main.js').catch((e) => show(e.stack ?? String(e)));
+    </script>
+  </body>
+</html>
