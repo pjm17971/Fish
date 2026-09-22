@@ -274,8 +274,9 @@ export const WATER = {
    * a smaller timestep through the CFL condition, so the cost goes up as the
    * *square* of the resolution: going from 80x58 to 96x68 costs 2.3 times the
    * work, and at 4.5 mm per cell there is nothing left to resolve — the ripples
-   * that matter at finer scales than this are added as a normal-map detail
-   * layer in the shader, which is both cheaper and sharper.
+   * that matter at finer scales than this are added in the shaders as a sum of
+   * travelling waves (RIPPLES in render/shaders.ts), which the surface and the
+   * caustics both use; that is both cheaper and sharper.
    */
   nx: 80,
   nz: 58,

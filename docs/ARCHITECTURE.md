@@ -99,6 +99,13 @@ Seven passes, in this order:
 6. **Glass** — the front pane, which is the phone's own screen.
 7. **Post** — tone mapping and camera-matched grain.
 
+The desktop preview (`preview/src/render/`) has no camera or glass pass, and
+has one the phone does not have yet: **shadows**, drawn after the caustics. The
+body and the plants are rendered as depth from the light (after it bends at the
+surface), and the fins into a second map holding the light they let through.
+The scene shaders look both up, with a soft edge whose width grows with the gap
+between the thing casting the shadow and the surface receiving it.
+
 **Why the volume pass sits where it does.** It has to come after the scene and
 before the surface, because the absorption applies to light travelling from the
 object to the eye, and the surface then bends whatever is left. Doing the surface

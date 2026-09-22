@@ -47,7 +47,14 @@ The same applies to the rest of it:
   turns. It is not a texture, because in a real fish it is not a pigment.
 - The **caustics** on the gravel are computed by refracting light through the
   actual simulated surface, so when you tilt the phone and the water sloshes, the
-  light on the floor sloshes with it.
+  light on the floor sloshes with it. The centimetre-scale ripples that draw the
+  bright network of lines are too small for the simulated grid to hold, so they
+  are added as travelling waves moving at the speed real ripples of that length
+  move — and the surface you see carries the same ripples as the light.
+- In the desktop preview, the fish, its fins and the plants **cast shadows**
+  that are sharp where they touch the sand and soften with height, which is
+  how the eye judges how far above the floor something is. The fins' shadows
+  are tinted red, because the fins are see-through and red.
 
 `docs/RESEARCH.md` sets out what was surveyed and what was chosen for each part,
 with sources. `docs/SIMULATION-SPEC.md` is the numerical model. `docs/ARCHITECTURE.md`

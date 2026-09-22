@@ -314,6 +314,15 @@ photon/ray-bundle construction; the reason for doing it rather than scrolling a
 caustics texture is that these caustics *are* the water surface, so when you tilt
 the phone and the water sloshes, the light on the floor sloshes with it.
 
+The simulated height field alone turned out to be nearly useless for this: its
+cells are 4.4 mm across and its waves are long and shallow, so the light it
+focuses varies by about 2% across the floor. The network of bright lines in a
+real tank comes from ripples one to five centimetres long, which curve the
+surface enough to bring light to a focus at a depth of a few centimetres. Those
+are added as a sum of travelling waves obeying the capillary-gravity dispersion
+relation (`omega^2 = g k + (sigma / rho) k^3`), and the surface shader uses the
+same waves so the light on the floor and the surface above it agree.
+
 ### The fish's colour
 
 A betta's blue-green iridescence is not a pigment. It is **thin-film

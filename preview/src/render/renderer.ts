@@ -3,9 +3,11 @@
  *
  * Pass order, and why:
  *
- *   1. **Caustics.** A grid of light rays is refracted through the current water
- *      surface and scattered additively onto a map of the tank floor, then
+ *   1. **Caustics.** A mesh of light rays is refracted through the current water
+ *      surface and laid additively onto a map of the tank floor, then
  *      blurred. This runs first because everything else reads it.
+ *   1b. **Shadows.** Depth from the light's point of view for the solid things,
+ *      and the light the fins let through, for everything else to look up.
  *   2. **Scene.** Tank, plants, fish, fins, pellets — everything under the water
  *      — into an offscreen colour target with depth.
  *   3. **Volume.** A full-screen pass that applies what the water does to light
@@ -42,6 +44,8 @@ import {
   BLUR_FRAG,
   VOLUME_FRAG,
   POST_FRAG,
+  SHADOW_FRAG,
+  FIN_SHADOW_FRAG,
   PARTICLE_VERT,
   PELLET_FRAG,
   BUBBLE_FRAG,
@@ -57,7 +61,7 @@ import {
   billboard,
 } from './meshes.js';
 import { World } from '../sim/world.js';
-import { OPTICS, TANK, TANK_MIN_Z } from '../sim/config.js';
+import { OPTICS, TANK, TANK_MIN_Z, WATER_DEPTH } from '../sim/config.js';
 import {
   Mat4,
   mat4,
@@ -73,7 +77,73 @@ import {
   copy,
 } from '../sim/math.js';
 
-const CAUSTIC_SIZE = 256;
+const CAUSTIC_SIZE = 1024;
+
+/**
+ * The caustic ray mesh. Under a millimetre between rays, so even the shortest
+ * ripple is crossed by ten of them and a focused line is drawn by many
+ * triangles rather than by one stretched one.
+ */
+const CAUSTIC_GRID_X = 480;
+const CAUSTIC_GRID_Z = 340;
+/**
+ * How far past the walls the ray mesh reaches, as a fraction of the tank. The
+ * light comes in at a slant, so rays entering just outside the water's
+ * footprint are the ones that land along the front of the floor; without them
+ * the front strip of sand reads as unlit.
+ */
+const CAUSTIC_MARGIN = 0.12;
+
+/**
+ * The tank light: above and slightly forward, which is where an aquarium hood
+ * puts it. Pointing towards the light.
+ */
+const LIGHT_DIR = normalize(v3(), v3(0.12, 0.96, 0.25));
+/**
+ * The lamp's angular radius seen from the water, in radians. An LED hood a
+ * quarter of a metre above the sand, with emitters a few millimetres across,
+ * subtends about this much. It sets how quickly a shadow's edge softens with
+ * the distance between the thing casting it and the sand.
+ */
+const LIGHT_ANGLE = 0.02;
+/**
+ * Peak slope of each of the short ripple components (see RIPPLES in the
+ * shaders). With twelve of them the surface's rms slope is about 0.1 — a
+ * gently rippled surface under a running filter, not a choppy one. Enough, at
+ * this depth, to bring the brightest lines to a focus on the sand.
+ */
+const RIPPLE_STEEPNESS = 0.04;
+
+const SHADOW_SIZE = 1024;
+
+/** The fins' pigment. The fin shadow pass needs it too: a red fin passes red light. */
+const FIN_COLOUR = [0.52, 0.06, 0.09] as const;
+
+/** The light's direction after bending at a flat water surface. */
+function refractedLight(towardsLight: Vec3, ior: number): Vec3 {
+  // Snell's law in vector form for the ray travelling down into the water,
+  // then turned back round to point towards the light.
+  const i = v3(-towardsLight.x, -towardsLight.y, -towardsLight.z);
+  const eta = 1 / ior;
+  const cosi = towardsLight.y;
+  const k = 1 - eta * eta * (1 - cosi * cosi);
+  const t = eta * cosi - Math.sqrt(k);
+  const r = v3(-(eta * i.x), -(eta * i.y + t), -(eta * i.z));
+  return normalize(r, r);
+}
+
+/** An orthographic projection, column-major like the rest of the matrices. */
+function mat4Ortho(o: Mat4, l: number, r: number, b: number, t: number, n: number, f: number): Mat4 {
+  o.fill(0);
+  o[0] = 2 / (r - l);
+  o[5] = 2 / (t - b);
+  o[10] = -2 / (f - n);
+  o[12] = -(r + l) / (r - l);
+  o[13] = -(t + b) / (t - b);
+  o[14] = -(f + n) / (f - n);
+  o[15] = 1;
+  return o;
+}
 
 export interface CameraState {
   /** Orbit angles, radians. */
@@ -96,6 +166,8 @@ export class Renderer {
   private readonly postProgram: Program;
   private readonly pelletProgram: Program;
   private readonly bubbleProgram: Program;
+  private readonly shadowProgram: Program;
+  private readonly finShadowProgram: Program;
 
   private readonly bodyMesh: BodyMesh;
   private readonly bodyGpu: Mesh;
@@ -108,15 +180,12 @@ export class Renderer {
   private readonly particleGpu: Mesh;
   private readonly quadGpu: Mesh;
   private readonly causticsGrid: Mesh;
-  private causticsPointCount = 0;
 
   private sceneTarget!: RenderTarget;
   private sceneDepth!: WebGLTexture;
   /** The scene from the camera mirrored in the water plane, for the surface. */
   private reflectionTarget!: RenderTarget;
   private reflectionDepth!: WebGLRenderbuffer;
-  /** Scales the caustic map so a flat surface reads 1.0. Measured at start-up. */
-  private causticNorm = 1;
   /** Reflection-pass clipping side; 0 in the main pass. */
   private clipSide = 0;
   /** Index applied to geometry seen through the panes; 1 in the reflection pass. */
@@ -128,6 +197,24 @@ export class Renderer {
   private causticsBlur!: RenderTarget;
   private heightTexture!: WebGLTexture;
   private heightData!: Float32Array;
+
+  /** Depth of the solid things, seen from the light. */
+  private shadowDepth!: WebGLTexture;
+  private shadowFramebuffer!: WebGLFramebuffer;
+  /**
+   * Two ways of reading the same depth map: as plain numbers, to find how far
+   * away a blocker is, and through the hardware's comparing filter, which
+   * gives a smooth fraction at every lookup rather than a yes or no.
+   */
+  private shadowRawSampler!: WebGLSampler;
+  private shadowCompareSampler!: WebGLSampler;
+  /** The light the fins let through, and how high the topmost fin is. */
+  private finShadowTarget!: RenderTarget;
+  private readonly lightDirWater = refractedLight(LIGHT_DIR, OPTICS.iorWater);
+  private readonly lightViewProjection = mat4();
+  private shadowExtentX = 1;
+  private shadowExtentY = 1;
+  private shadowDepthRange = 1;
 
   private readonly view = mat4();
   private readonly projection = mat4();
@@ -158,6 +245,8 @@ export class Renderer {
     this.postProgram = createProgram(gl, BLUR_VERT, POST_FRAG, 'post');
     this.pelletProgram = createProgram(gl, PARTICLE_VERT, PELLET_FRAG, 'pellet');
     this.bubbleProgram = createProgram(gl, PARTICLE_VERT, BUBBLE_FRAG, 'bubble');
+    this.shadowProgram = createProgram(gl, SCENE_VERT, SHADOW_FRAG, 'shadow');
+    this.finShadowProgram = createProgram(gl, SCENE_VERT, FIN_SHADOW_FRAG, 'fin shadow');
 
     // --- Geometry ---
     this.bodyMesh = new BodyMesh(world.morphology);
@@ -205,20 +294,34 @@ export class Renderer {
     this.quadGpu = new Mesh(gl, this.blurProgram, [{ name: 'aPosition', size: 2, offset: 0 }], 8);
     this.quadGpu.setVertices(new Float32Array([-1, -1, 3, -1, -1, 3]));
 
-    // Caustics: one point per cell of the water grid.
-    const cw = world.water.nx - 1;
-    const ch = world.water.nz - 1;
-    const grid = new Float32Array(cw * ch * 2);
+    // Caustics: a mesh of rays over the surface, a little wider than it.
+    const grid = new Float32Array((CAUSTIC_GRID_X + 1) * (CAUSTIC_GRID_Z + 1) * 2);
     let g = 0;
-    for (let j = 0; j < ch; j++) {
-      for (let i = 0; i < cw; i++) {
-        grid[g++] = (i + 0.5) / world.water.nx;
-        grid[g++] = (j + 0.5) / world.water.nz;
+    for (let j = 0; j <= CAUSTIC_GRID_Z; j++) {
+      for (let i = 0; i <= CAUSTIC_GRID_X; i++) {
+        grid[g++] = -CAUSTIC_MARGIN + ((1 + 2 * CAUSTIC_MARGIN) * i) / CAUSTIC_GRID_X;
+        grid[g++] = -CAUSTIC_MARGIN + ((1 + 2 * CAUSTIC_MARGIN) * j) / CAUSTIC_GRID_Z;
       }
     }
-    this.causticsPointCount = cw * ch;
+    const gridIndices = new Uint32Array(CAUSTIC_GRID_X * CAUSTIC_GRID_Z * 6);
+    let gi = 0;
+    for (let j = 0; j < CAUSTIC_GRID_Z; j++) {
+      for (let i = 0; i < CAUSTIC_GRID_X; i++) {
+        const a = j * (CAUSTIC_GRID_X + 1) + i;
+        const b = a + 1;
+        const c = a + CAUSTIC_GRID_X + 1;
+        const d = c + 1;
+        gridIndices[gi++] = a;
+        gridIndices[gi++] = c;
+        gridIndices[gi++] = b;
+        gridIndices[gi++] = b;
+        gridIndices[gi++] = c;
+        gridIndices[gi++] = d;
+      }
+    }
     this.causticsGrid = new Mesh(gl, this.causticsProgram, [{ name: 'aGrid', size: 2, offset: 0 }], 8);
     this.causticsGrid.setVertices(grid);
+    this.causticsGrid.setIndices(gridIndices);
 
     this.heightData = new Float32Array(world.water.nx * world.water.nz);
     this.heightTexture = gl.createTexture()!;
@@ -256,33 +359,78 @@ export class Renderer {
       gl.FLOAT,
     );
 
+    this.createShadowTargets();
     this.resize();
-    this.calibrateCaustics();
   }
 
   /**
-   * Measure what the caustic map reads for a perfectly flat surface, so the
-   * shaders can treat that level as "no focusing". The map is an accumulation
-   * of splatted rays and its absolute level depends on how many were splatted
-   * and how they were blurred — a number with no physical meaning on its own.
-   * Ray splatting conserves the light, so the mean does not change as the
-   * surface moves; only its distribution does. Measured once, at start-up,
-   * while the surface is still flat.
+   * The shadow maps, and the light's view of the tank.
+   *
+   * The light does not move, so its view is worked out once: an orthographic
+   * box looking down the refracted light direction, just large enough to hold
+   * the water (and a fish breaking the surface to breathe).
    */
-  private calibrateCaustics(): void {
+  private createShadowTargets(): void {
     const gl = this.gl;
-    this.renderCaustics();
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.causticsBlur.framebuffer);
-    const px = new Float32Array(CAUSTIC_SIZE * CAUSTIC_SIZE * 4);
-    gl.readPixels(0, 0, CAUSTIC_SIZE, CAUSTIC_SIZE, gl.RGBA, gl.FLOAT, px);
+
+    this.shadowDepth = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this.shadowDepth);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, SHADOW_SIZE, SHADOW_SIZE, 0, gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.shadowRawSampler = gl.createSampler()!;
+    gl.samplerParameteri(this.shadowRawSampler, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.samplerParameteri(this.shadowRawSampler, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.samplerParameteri(this.shadowRawSampler, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.samplerParameteri(this.shadowRawSampler, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.shadowCompareSampler = gl.createSampler()!;
+    gl.samplerParameteri(this.shadowCompareSampler, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.samplerParameteri(this.shadowCompareSampler, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.samplerParameteri(this.shadowCompareSampler, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.samplerParameteri(this.shadowCompareSampler, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.samplerParameteri(this.shadowCompareSampler, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+    gl.samplerParameteri(this.shadowCompareSampler, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+    this.shadowFramebuffer = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFramebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, this.shadowDepth, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    let sum = 0;
-    for (let i = 0; i < CAUSTIC_SIZE * CAUSTIC_SIZE; i++) sum += px[i * 4];
-    const mean = sum / (CAUSTIC_SIZE * CAUSTIC_SIZE);
-    // A read-back that fails (some drivers refuse float reads) comes back as
-    // zeros; fall back to the value measured in development rather than
-    // dividing by it.
-    this.causticNorm = Number.isFinite(mean) && mean > 1e-6 ? 1 / mean : 1 / 0.0053;
+
+    this.finShadowTarget = createRenderTarget(
+      gl,
+      SHADOW_SIZE,
+      SHADOW_SIZE,
+      gl.RGBA16F,
+      gl.RGBA,
+      gl.FLOAT,
+      gl.NEAREST,
+    );
+
+    const L = this.lightDirWater;
+    const centre = v3(0, (TANK.floorY + TANK.waterY) / 2, -TANK.depth / 2);
+    const eye = v3(centre.x + L.x * 0.5, centre.y + L.y * 0.5, centre.z + L.z * 0.5);
+    const view = mat4();
+    mat4LookAt(view, eye, centre, v3(0, 0, -1));
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const x of [-TANK.width / 2, TANK.width / 2]) {
+      for (const y of [TANK.floorY - 0.004, TANK.waterY + 0.02]) {
+        for (const z of [TANK_MIN_Z, 0]) {
+          const vx = view[0] * x + view[4] * y + view[8] * z + view[12];
+          const vy = view[1] * x + view[5] * y + view[9] * z + view[13];
+          const vz = view[2] * x + view[6] * y + view[10] * z + view[14];
+          minX = Math.min(minX, vx); maxX = Math.max(maxX, vx);
+          minY = Math.min(minY, vy); maxY = Math.max(maxY, vy);
+          minZ = Math.min(minZ, vz); maxZ = Math.max(maxZ, vz);
+        }
+      }
+    }
+    const projection = mat4();
+    mat4Ortho(projection, minX, maxX, minY, maxY, -maxZ, -minZ);
+    mat4Multiply(this.lightViewProjection, projection, view);
+    this.shadowExtentX = maxX - minX;
+    this.shadowExtentY = maxY - minY;
+    this.shadowDepthRange = maxZ - minZ;
   }
 
   resize(): void {
@@ -365,14 +513,11 @@ export class Renderer {
     if (u.uScattering) gl.uniform1f(u.uScattering, OPTICS.scatteringCoefficient);
     if (u.uWaterTint) gl.uniform3f(u.uWaterTint, 0.94, 1.0, 0.97);
 
-    // A tank light above and slightly forward, which is where an aquarium hood
-    // puts it.
-    if (u.uLightDir) gl.uniform3f(u.uLightDir, 0.12, 0.96, 0.25);
+    if (u.uLightDir) gl.uniform3f(u.uLightDir, LIGHT_DIR.x, LIGHT_DIR.y, LIGHT_DIR.z);
     if (u.uLightColour) gl.uniform3f(u.uLightColour, 1.05, 1.0, 0.92);
     if (u.uAmbient) gl.uniform3f(u.uAmbient, 0.10, 0.13, 0.15);
     if (u.uExposure) gl.uniform1f(u.uExposure, 1.5);
 
-    if (u.uCausticNorm) gl.uniform1f(u.uCausticNorm, this.causticNorm);
     if (u.uWaterMin) gl.uniform3f(u.uWaterMin, -TANK.width / 2, TANK.floorY, TANK_MIN_Z);
     if (u.uWaterMax) gl.uniform3f(u.uWaterMax, TANK.width / 2, TANK.waterY, 0);
     if (u.uRefractIOR) gl.uniform1f(u.uRefractIOR, this.refractIOR);
@@ -383,18 +528,43 @@ export class Renderer {
     if (u.uWaterY) gl.uniform1f(u.uWaterY, TANK.waterY);
     if (u.uCausticsExtent) gl.uniform2f(u.uCausticsExtent, TANK.width / 2, TANK.depth);
     if (u.uTime) gl.uniform1f(u.uTime, time);
+    if (u.uRippleSteepness) gl.uniform1f(u.uRippleSteepness, RIPPLE_STEEPNESS);
+
+    const L = this.lightDirWater;
+    if (u.uLightDirWater) gl.uniform3f(u.uLightDirWater, L.x, L.y, L.z);
+    if (u.uLightViewProjection) gl.uniformMatrix4fv(u.uLightViewProjection, false, this.lightViewProjection);
+    if (u.uShadowExtent) gl.uniform2f(u.uShadowExtent, this.shadowExtentX, this.shadowExtentY);
+    if (u.uShadowDepthRange) gl.uniform1f(u.uShadowDepthRange, this.shadowDepthRange);
+    if (u.uLightAngle) gl.uniform1f(u.uLightAngle, LIGHT_ANGLE);
+    if (u.uShadowMap) {
+      gl.activeTexture(gl.TEXTURE3);
+      gl.bindTexture(gl.TEXTURE_2D, this.shadowDepth);
+      gl.bindSampler(3, this.shadowRawSampler);
+      gl.uniform1i(u.uShadowMap, 3);
+    }
+    if (u.uShadowCompare) {
+      gl.activeTexture(gl.TEXTURE5);
+      gl.bindTexture(gl.TEXTURE_2D, this.shadowDepth);
+      gl.bindSampler(5, this.shadowCompareSampler);
+      gl.uniform1i(u.uShadowCompare, 5);
+    }
+    if (u.uFinShadow) {
+      gl.activeTexture(gl.TEXTURE4);
+      gl.bindTexture(gl.TEXTURE_2D, this.finShadowTarget.texture);
+      gl.uniform1i(u.uFinShadow, 4);
+    }
   }
 
   private bindCaustics(p: Program, unit = 0): void {
     const gl = this.gl;
     if (!p.uniforms.uCaustics) return;
     gl.activeTexture(gl.TEXTURE0 + unit);
-    gl.bindTexture(gl.TEXTURE_2D, this.causticsBlur.texture);
+    gl.bindTexture(gl.TEXTURE_2D, this.causticsTarget.texture);
     gl.uniform1i(p.uniforms.uCaustics, unit);
   }
 
   /** Refract light through the surface and accumulate where it lands. */
-  private renderCaustics(): void {
+  private renderCaustics(time: number): void {
     const gl = this.gl;
     const water = this.world.water;
 
@@ -422,28 +592,97 @@ export class Renderer {
     gl.uniform2f(u.uTankExtent!, TANK.width / 2, TANK.depth);
     gl.uniform1f(u.uWaterY!, TANK.waterY);
     gl.uniform1f(u.uFloorY!, TANK.floorY);
-    gl.uniform3f(u.uLightDir!, 0.12, 0.96, 0.25);
+    gl.uniform3f(u.uLightDir!, LIGHT_DIR.x, LIGHT_DIR.y, LIGHT_DIR.z);
     gl.uniform1f(u.uIOR!, OPTICS.iorWater);
-    this.causticsGrid.vertexCount = this.causticsPointCount;
-    this.causticsGrid.draw(gl.POINTS);
+    gl.uniform1f(u.uTime!, time);
+    gl.uniform1f(u.uRippleSteepness!, RIPPLE_STEEPNESS);
+    gl.disable(gl.CULL_FACE); // where the light folds over, triangles flip
+    this.causticsGrid.draw();
 
     gl.disable(gl.BLEND);
 
-    // Blur, separably. Real caustics have soft edges; a sharp accumulation
-    // buffer reads as a scatter of dots.
+    // Blur, separably, by what the lamp's size does over the depth of the
+    // water: a lamp that is not a point never brings light to a perfect line.
+    //
+    // The five-tap kernel is only a Gaussian when its taps are a texel apart
+    // (its spread is then about 1.65 texels). Stretching it to blur further
+    // leaves gaps between the taps, and every bright line comes out as a row of
+    // faint parallel copies. So it is repeated instead, which adds the spreads
+    // in quadrature. The result ends up back in causticsTarget.
+    const radiusTexels = (WATER_DEPTH * LIGHT_ANGLE) / (TANK.width / CAUSTIC_SIZE);
+    const passes = Math.max(1, Math.ceil(((radiusTexels * 0.5) / 1.65) ** 2));
     gl.useProgram(this.blurProgram.program);
-    for (const [src, dst, dir] of [
-      [this.causticsTarget, this.causticsBlur, [1 / CAUSTIC_SIZE, 0]],
-      [this.causticsBlur, this.causticsTarget, [0, 1 / CAUSTIC_SIZE]],
-      [this.causticsTarget, this.causticsBlur, [1.5 / CAUSTIC_SIZE, 0]],
-    ] as [RenderTarget, RenderTarget, number[]][]) {
-      gl.bindFramebuffer(gl.FRAMEBUFFER, dst.framebuffer);
-      gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, src.texture);
-      gl.uniform1i(this.blurProgram.uniforms.uSource!, 0);
-      gl.uniform2f(this.blurProgram.uniforms.uDirection!, dir[0], dir[1]);
-      this.quadGpu.draw();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.uniform1i(this.blurProgram.uniforms.uSource!, 0);
+    for (let i = 0; i < passes; i++) {
+      for (const [src, dst, dx, dy] of [
+        [this.causticsTarget, this.causticsBlur, 1, 0],
+        [this.causticsBlur, this.causticsTarget, 0, 1],
+      ] as [RenderTarget, RenderTarget, number, number][]) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, dst.framebuffer);
+        gl.bindTexture(gl.TEXTURE_2D, src.texture);
+        gl.uniform2f(this.blurProgram.uniforms.uDirection!, dx / CAUSTIC_SIZE, dy / CAUSTIC_SIZE);
+        this.quadGpu.draw();
+      }
     }
+  }
+
+  /** The fish's body and fins move every frame; rebuild them once, before any pass. */
+  private updateDynamicMeshes(): void {
+    this.bodyMesh.update(this.world.body, this.world.locomotion, this.world.command.gillFlare);
+    this.bodyGpu.updateVertices(this.bodyMesh.vertices);
+    for (let i = 0; i < this.finGpu.length; i++) {
+      this.finMeshes[i].update();
+      this.finGpu[i].updateVertices(this.finMeshes[i].vertices);
+    }
+  }
+
+  /**
+   * The scene from the light: depth for the solid things (body, plants), then
+   * the fins' transmitted light. The tank itself is left out — the sand and
+   * the walls only receive shadow here, and a floor in its own shadow map is
+   * the usual source of speckled self-shadowing.
+   */
+  private renderShadows(): void {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFramebuffer);
+    gl.viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
+    gl.clearDepth(1);
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.disable(gl.BLEND);
+    // Both faces: leaves are single sheets, and a closed body casts the same
+    // shadow either way.
+    gl.disable(gl.CULL_FACE);
+
+    gl.useProgram(this.shadowProgram.program);
+    const u = this.shadowProgram.uniforms;
+    gl.uniformMatrix4fv(u.uViewProjection!, false, this.lightViewProjection);
+    if (u.uRefractIOR) gl.uniform1f(u.uRefractIOR, 1);
+    this.plantsGpu.draw();
+    this.bodyGpu.draw();
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.finShadowTarget.framebuffer);
+    gl.viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
+    gl.clearColor(1, 1, 1, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.disable(gl.DEPTH_TEST);
+    gl.enable(gl.BLEND);
+    // Colour: multiply, so overlapping fins compound. Alpha: keep the largest
+    // (1 - depth), which is the fin nearest the light.
+    gl.blendEquationSeparate(gl.FUNC_ADD, gl.MAX);
+    gl.blendFuncSeparate(gl.DST_COLOR, gl.ZERO, gl.ONE, gl.ONE);
+    gl.useProgram(this.finShadowProgram.program);
+    const f = this.finShadowProgram.uniforms;
+    gl.uniformMatrix4fv(f.uViewProjection!, false, this.lightViewProjection);
+    if (f.uRefractIOR) gl.uniform1f(f.uRefractIOR, 1);
+    if (f.uFinColour) gl.uniform3f(f.uFinColour, FIN_COLOUR[0], FIN_COLOUR[1], FIN_COLOUR[2]);
+    const L = this.lightDirWater;
+    if (f.uLightDirWater) gl.uniform3f(f.uLightDirWater, L.x, L.y, L.z);
+    for (const fin of this.finGpu) fin.draw();
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.disable(gl.BLEND);
   }
 
   private renderScene(time: number): void {
@@ -531,8 +770,6 @@ export class Renderer {
 
     // --- Fish body ---
     gl.enable(gl.CULL_FACE);
-    this.bodyMesh.update(this.world.body, this.world.locomotion, this.world.command.gillFlare);
-    this.bodyGpu.updateVertices(this.bodyMesh.vertices);
     gl.useProgram(this.fishProgram.program);
     this.setSharedUniforms(this.fishProgram, time);
     this.bindCaustics(this.fishProgram);
@@ -558,13 +795,9 @@ export class Renderer {
     this.setSharedUniforms(this.finProgram, time);
     this.bindCaustics(this.finProgram);
     if (this.finProgram.uniforms.uFinColour) {
-      gl.uniform3f(this.finProgram.uniforms.uFinColour, 0.52, 0.06, 0.09);
+      gl.uniform3f(this.finProgram.uniforms.uFinColour, FIN_COLOUR[0], FIN_COLOUR[1], FIN_COLOUR[2]);
     }
-    for (let i = 0; i < this.finGpu.length; i++) {
-      this.finMeshes[i].update();
-      this.finGpu[i].updateVertices(this.finMeshes[i].vertices);
-      this.finGpu[i].draw();
-    }
+    for (const fin of this.finGpu) fin.draw();
     gl.depthMask(true);
     gl.disable(gl.BLEND);
 
@@ -701,7 +934,9 @@ export class Renderer {
   render(camera: CameraState, time: number): void {
     this.resize();
     this.setCamera(camera);
-    this.renderCaustics();
+    this.updateDynamicMeshes();
+    this.renderCaustics(time);
+    this.renderShadows();
     this.renderReflection(time);
     this.renderScene(time);
     this.renderVolume(time);

@@ -823,6 +823,20 @@ original grid cell area to the deformed cell area (the Jacobian of the refractio
 Scattered additively into a `256 x 256` map, then blurred `1.5 px`. Because it is
 computed from the actual surface, the caustics move correctly when the water sloshes.
 
+*Desktop preview, not yet ported:* the rays are a `480 x 340` triangle mesh
+rather than points, drawn into a `1024 x 1024` map, each triangle carrying its
+exact area ratio (so a flat surface reads exactly 1.0 and needs no calibration).
+The surface they refract through is the simulated height field plus twelve
+short travelling waves, 4.5 cm down to 0.9 cm, each with peak slope `0.04` and
+the capillary-gravity phase speed. The map is blurred by the lamp's angular
+radius (`0.02 rad`) over the water depth.
+
+**Shadows** (desktop preview, not yet ported). A `1024 x 1024` depth map from
+the refracted light direction for the body and plants, and a second map of the
+light the fins transmit, tinted by their pigment. Soft edges by blocker search:
+penumbra width `2 * gap * 0.02 + 0.7 mm`, capped at `12 mm`. The same depth map,
+sampled over a 1 to 2 cm radius, dims the ambient light under overhangs.
+
 **Fish skin.** Layered:
 1. GGX specular for the mucus layer, roughness `0.14`.
 2. Thin-film interference on the guanine platelets in the scales (Belcour and Barla
