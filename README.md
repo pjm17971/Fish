@@ -47,10 +47,14 @@ The same applies to the rest of it:
   turns. It is not a texture, because in a real fish it is not a pigment.
 - The **caustics** on the gravel are computed by refracting light through the
   actual simulated surface, so when you tilt the phone and the water sloshes, the
-  light on the floor sloshes with it. The centimetre-scale ripples that draw the
-  bright network of lines are too small for the simulated grid to hold, so they
-  are added as travelling waves moving at the speed real ripples of that length
-  move — and the surface you see carries the same ripples as the light.
+  light on the floor sloshes with it. In the desktop preview the surface is
+  solved as the tank's own standing waves, each ringing at the speed real water
+  gives a wave of its length, so the centimetre-scale ripples that draw the
+  bright network of lines are part of the simulation too: they spread from the
+  filter outlet, cross each other, reflect off the glass and die away as real
+  ones do, and the light follows them.
+- Fine specks drift in the desktop preview's water, carried by the current and
+  settling slowly. They are nearly invisible until the lamp catches them.
 - In the desktop preview, the fish, its fins and the plants **cast shadows**
   that are sharp where they touch the sand and soften with height, which is
   how the eye judges how far above the floor something is. The fins' shadows

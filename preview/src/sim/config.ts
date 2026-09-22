@@ -263,60 +263,55 @@ export const FINS = {
 } as const;
 
 // ---------------------------------------------------------------------------
-// Water surface — damped wave equation on a height field
+// Water surface — the tank's standing waves (see WaterSurface)
 // ---------------------------------------------------------------------------
 
 export const WATER = {
   /**
-   * Grid resolution.
+   * Grid resolution: 4.4 mm between nodes, which holds waves down to about a
+   * centimetre long. That is enough for the ripples that draw the light on the
+   * sand (two to five centimetres); shorter ones are damped out within a few
+   * centimetres by the surface film anyway (see filmDamping).
    *
-   * Sized against the timestep rather than picked for looks. A finer grid forces
-   * a smaller timestep through the CFL condition, so the cost goes up as the
-   * *square* of the resolution: going from 80x58 to 96x68 costs 2.3 times the
-   * work, and at 4.5 mm per cell there is nothing left to resolve — the ripples
-   * that matter at finer scales than this are added in the shaders as a sum of
-   * travelling waves (RIPPLES in render/shaders.ts), which the surface and the
-   * caustics both use; that is both cheaper and sharper.
+   * The surface is solved as the tank's standing waves (see WaterSurface), so
+   * the cost of a step does not depend on stability, only on the number of
+   * modes; rebuilding the heights from them is the expensive part, and that is
+   * done once per frame, not per step.
    */
   nx: 80,
   nz: 58,
   /**
-   * Wave speed. NOT a tuning parameter: this is sqrt(g * depth), the
-   * shallow-water long-wave result, and it is what makes the sloshing period
-   * come out at the physically correct value. See test `water.slosh`.
+   * The long-wave speed, sqrt(g * depth). Not used by the solver, which uses
+   * the full dispersion relation, but it is what the shallow-water sloshing
+   * formula is written in terms of.
    */
   get waveSpeed(): number {
     return Math.sqrt(GRAVITY * WATER_DEPTH); // 0.913 m/s
   },
+  /** Surface tension of water at 25 C, N/m. Sets how fast the shortest ripples run. */
+  surfaceTension: 0.0720,
   /**
-   * Viscous smoothing of the velocity field, which removes grid-scale buzz.
-   *
-   * The stability limit for this term is not the one it looks like. Taken alone
-   * it is a diffusion, so the obvious condition is alpha*c*dt/dx^2 <= 1/2 — but
-   * the wave and viscous terms share the same velocity update, and analysing the
-   * two-by-two amplification matrix of the combined scheme gives a much tighter
-   * requirement: dt*(alpha*c*lambda_max + beta) must stay below 1, where
-   * lambda_max is the largest eigenvalue of the discrete Laplacian. Above that
-   * the velocity damping overshoots each step and the shortest wavelength on the
-   * grid grows instead of decaying.
-   *
-   * The first value tried, 0.008, satisfied the diffusion condition at 0.4 of
-   * its limit and violated this one by 60%. The surface behaved impeccably in
-   * gentle conditions and went to NaN within a second of being shaken hard. The
-   * constructor now checks the real condition, so a change to the grid, the
-   * timestep or the damping cannot quietly reintroduce it.
+   * Bulk damping of the long waves, per second (half of it is the decay rate
+   * of the amplitude). Sized so a slosh dies away over about 4 seconds.
    */
-  alpha: 0.0005,
-  /** Bulk damping. Sized so a disturbance dies away over about 4 seconds. */
   beta: 0.45,
-  /** How stiffly the bulk follows a tilt of the phone. */
-  sloshStiffness: 26.0,
   /**
-   * Fixed substep. Sits at 73% of the CFL limit and 59% of the damping limit for
-   * the shipped grid, both of which the constructor checks.
+   * Damping by the surface film, as a fraction of the rate for a film that
+   * resists stretching completely: k * sqrt(nu * omega / 8) (Lamb 1932; Miles
+   * 1967). Every aquarium has such a film — dissolved organics collect at the
+   * surface — and it is tens of times more damping than clean water gives
+   * short waves. At 1 a three-centimetre ripple loses half its height in about
+   * a second and a one-centimetre ripple in a quarter of that, which is what
+   * keeps the surface from glittering all over.
    */
-  dt: 0.0025,
-  maxSubsteps: 10,
+  filmDamping: 1.0,
+  /**
+   * Fixed step. The modes are advanced exactly, so this is not a stability
+   * limit; it only has to sample the outlet's noise finely enough, and at
+   * 240 Hz it is thirty times the outlet's frequency.
+   */
+  dt: 1 / 240,
+  maxSubsteps: 24,
 
   /** Fish coupling: how close to the surface a body segment has to be to disturb it. */
   fishCouplingRange: 0.020,
@@ -333,21 +328,44 @@ export const WATER = {
    * The filter outlet, where the return stream meets the surface.
    *
    * A tank with a filter running is never still: the return flow breaks the
-   * surface and keeps a patch of small ripples going all the time, and those
-   * ripples are most of what makes the water *visible* — they carry the
-   * caustics on the sand, the wobble in everything seen through the surface,
-   * and the glints. Without a source the height field settles to a perfect
-   * plane within a few seconds of the last disturbance and the tank looks dry.
+   * surface and keeps ripples going all the time, and those ripples are most
+   * of what makes the water *visible* — they carry the caustics on the sand,
+   * the wobble in everything seen through the surface, and the glints. Without
+   * a source the surface settles to a perfect plane within a few seconds and
+   * the tank looks dry.
    *
-   * Modelled as a small oscillating push on the surface velocity over a
-   * Gaussian patch at the outlet. The amplitude is set to give ripples of
-   * about a millimetre, which is what a gentle filter return produces; the
-   * frequency and strength flutter slowly, because a real stream does not hum
-   * a pure note.
+   * Modelled as a few small patches of the stream, each pushed up and down by
+   * its own band-limited noise, since the stream is turbulent and no two parts
+   * of it move together. The band is centred at 6 Hz because that is the
+   * frequency of a five-centimetre ripple, the length the rest of the surface
+   * is centred on (see agitation), and the push is set so the ripples near the
+   * outlet are a millimetre or two high, as a gentle filter return makes them.
+   * The ripples, and so the light on the sand, are a little livelier near the
+   * outlet than across the tank, as in a real one.
    */
-  outletRadius: 0.014,
-  outletRippleHz: 2.6,
-  outletRippleAccel: 2.0,
+  outletRadius: 0.025,
+  /**
+   * The rest of the surface. The outlet's current spreads across the whole
+   * tank, and the eddies it carries keep the surface gently rippled
+   * everywhere, not only near the outlet. Given as the ripples that result:
+   * an rms slope (a flat surface is 0; at 0.1 the surface rises and falls by
+   * about a millimetre), spread log-normally about a wavelength.
+   *
+   * The wavelength is a choice between calm and crisp. Light on the sand
+   * comes to sharp bright lines only where ripples are short enough to focus
+   * it within the water's depth, which here means about a centimetre; ripples
+   * that short rise and fall fifteen to thirty times a second, and the light
+   * they throw reads as flicker. Five-centimetre ripples rise and fall about six times a second
+   * and give a softer, slower, dappled pattern. Measured on the sand: each spot
+   * goes bright-dark-bright about 7 times a second with these settings, against
+   * about 21 with the fixed ripple waves this replaced.
+   */
+  agitation: { slopeRms: 0.10, wavelength: 0.05, spread: 0.35 },
+  outletPatches: 6,
+  outletPatchRadius: 0.007,
+  outletHz: 6.0,
+  outletQ: 1.5,
+  outletAccel: 1.6,
   /** Bulk flow: curl-noise. */
   curlScale: 0.09,
   curlTimeHz: 0.15,

@@ -230,6 +230,36 @@ make that pass — it passes because the wave speed is physical.
 Reflecting (Neumann, `du/dn = 0`) boundaries at all four walls, which is what makes
 water pile up in a corner when you tilt the phone.
 
+**Desktop preview, not yet ported: the surface as standing waves.** The grid
+equation above moves every wave at `c = 0.913 m/s`, which is right for the slosh
+and about four times too fast for the 2 to 5 cm ripples that make the caustics
+(a 3 cm ripple travels at 0.25 m/s). The preview instead writes the surface as
+the tank's standing waves, `cos(m pi x / W) cos(n pi z / D)` for the `80 x 58`
+lowest `(m, n)`, which satisfy the same wall condition exactly. Each mode is a
+damped oscillator at
+
+```
+omega^2 = (g k + (sigma / rho) k^3) tanh(k h),   sigma = 0.072 N/m
+Gamma   = beta / 2 + filmDamping * k * sqrt(nu * omega / 8)
+```
+
+the second term being the damping of an inextensible surface film (Lamb 1932;
+Miles 1967), with `filmDamping = 1`. A mode is advanced with the exact solution
+of its oscillator over `dt = 1/240 s`, so there is no stability limit; forcing
+enters as a shift of the mode's resting point by `F / omega^2`. Heights and
+slopes (exact, from the sine series) are rebuilt only when read, once per
+frame. Measured slosh period: 0.807 s against 0.835 s from the finite-depth
+formula (`water.slosh` now checks within 10 % of that formula). A steady tank
+acceleration `a` settles the surface to slope `-a / g` (test).
+
+**Agitation** (desktop preview). Every mode also gets a random velocity kick
+each step, `q sqrt(dt) N(0, 1)`, with `q` chosen so its steady variance
+`q^2 / (4 Gamma omega^2)` follows a log-normal slope spectrum: rms slope
+`0.10`, centred on `5 cm`, log-width `0.35` (per step of `ln k`: each mode's
+height weight is the target divided by `k^4`, for the `k^2` growth in the number
+of modes and the `k^2` more slope per unit height). This stands in for the eddies
+the filter current carries across the whole surface. Off when the outlet is off.
+
 ### 3.2 Forcing terms
 
 **Sloshing from device motion.** The phone's linear acceleration `a` (world frame, from
@@ -291,6 +321,12 @@ with slow flutter in both strength and frequency, sized to give ripples of
 about a millimetre. Applied every substep, not per frame, so the ripple height
 does not depend on the frame rate. Test: peak displacement between 0.2 and 3 mm,
 finite over a long run.
+
+*Desktop preview:* six patches `7 mm` across within `25 mm` of the outlet, each
+pushed by its own band-limited noise (a resonator at `6 Hz`, `Q = 1.5`, the
+frequency of a 5 cm ripple), push `1.6 m/s^2`. With the agitation, the whole
+surface moves by about `0.9 mm` rms; test: rms between 0.2 and 2 mm, peak under
+1 cm, finite over a long run.
 
 ## 4. Fish locomotion
 
@@ -826,10 +862,19 @@ computed from the actual surface, the caustics move correctly when the water slo
 *Desktop preview, not yet ported:* the rays are a `480 x 340` triangle mesh
 rather than points, drawn into a `1024 x 1024` map, each triangle carrying its
 exact area ratio (so a flat surface reads exactly 1.0 and needs no calibration).
-The surface they refract through is the simulated height field plus twelve
-short travelling waves, 4.5 cm down to 0.9 cm, each with peak slope `0.04` and
-the capillary-gravity phase speed. The map is blurred by the lamp's angular
-radius (`0.02 rad`) over the water depth.
+The surface they refract through is the simulated one alone (the modal solver,
+§3.1), read with a smooth bicubic interpolation of its height and exact slopes
+so the curvature has no kinks at grid nodes. The map is blurred by the lamp's
+angular radius (`0.02 rad`) over the water depth.
+
+**Specks** (desktop preview, not yet ported). 900 particles, radius `0.03` to
+`0.22 mm` drawn log-uniformly, excess density `25 kg/m^3` (Stokes settling
+from `0.06 mm/s` for the smallest to `3 mm/s` for the largest), eddy diffusivity `4e-7 m^2/s`, advected by
+the bulk flow and respawned at a random point when they reach the floor.
+Radiance `2 * albedo * E * p(theta)` with
+`p = 0.5 * HG(0.9) + 0.5 / (4 pi)`, where `E` is the lamp light after caustics
+(the floor map faded by depth fraction), shadows and absorption. Drawn as
+points at least 2 px across, with alpha scaled so each covers its true area.
 
 **Shadows** (desktop preview, not yet ported). A `1024 x 1024` depth map from
 the refracted light direction for the body and plants, and a second map of the

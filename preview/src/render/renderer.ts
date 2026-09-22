@@ -47,6 +47,8 @@ import {
   SHADOW_FRAG,
   FIN_SHADOW_FRAG,
   PARTICLE_VERT,
+  MOTE_VERT,
+  MOTE_FRAG,
   PELLET_FRAG,
   BUBBLE_FRAG,
 } from './shaders.js';
@@ -61,6 +63,7 @@ import {
   billboard,
 } from './meshes.js';
 import { World } from '../sim/world.js';
+import { Particulate, PARTICULATE_FLOATS } from './particulate.js';
 import { OPTICS, TANK, TANK_MIN_Z, WATER_DEPTH } from '../sim/config.js';
 import {
   Mat4,
@@ -106,14 +109,6 @@ const LIGHT_DIR = normalize(v3(), v3(0.12, 0.96, 0.25));
  * the distance between the thing casting it and the sand.
  */
 const LIGHT_ANGLE = 0.02;
-/**
- * Peak slope of each of the short ripple components (see RIPPLES in the
- * shaders). With twelve of them the surface's rms slope is about 0.1 — a
- * gently rippled surface under a running filter, not a choppy one. Enough, at
- * this depth, to bring the brightest lines to a focus on the sand.
- */
-const RIPPLE_STEEPNESS = 0.04;
-
 const SHADOW_SIZE = 1024;
 
 /** The fins' pigment. The fin shadow pass needs it too: a red fin passes red light. */
@@ -168,6 +163,7 @@ export class Renderer {
   private readonly bubbleProgram: Program;
   private readonly shadowProgram: Program;
   private readonly finShadowProgram: Program;
+  private readonly moteProgram: Program;
 
   private readonly bodyMesh: BodyMesh;
   private readonly bodyGpu: Mesh;
@@ -180,6 +176,9 @@ export class Renderer {
   private readonly particleGpu: Mesh;
   private readonly quadGpu: Mesh;
   private readonly causticsGrid: Mesh;
+  private readonly motesGpu: Mesh;
+  private readonly particulate = new Particulate();
+  private lastTime = -1;
 
   private sceneTarget!: RenderTarget;
   private sceneDepth!: WebGLTexture;
@@ -247,6 +246,7 @@ export class Renderer {
     this.bubbleProgram = createProgram(gl, PARTICLE_VERT, BUBBLE_FRAG, 'bubble');
     this.shadowProgram = createProgram(gl, SCENE_VERT, SHADOW_FRAG, 'shadow');
     this.finShadowProgram = createProgram(gl, SCENE_VERT, FIN_SHADOW_FRAG, 'fin shadow');
+    this.moteProgram = createProgram(gl, MOTE_VERT, MOTE_FRAG, 'mote');
 
     // --- Geometry ---
     this.bodyMesh = new BodyMesh(world.morphology);
@@ -291,6 +291,17 @@ export class Renderer {
     );
     this.particleGpu.setVertices(this.particleData, true);
 
+    this.motesGpu = new Mesh(
+      gl,
+      this.moteProgram,
+      [
+        { name: 'aPosition', size: 3, offset: 0 },
+        { name: 'aSpeck', size: 2, offset: 12 },
+      ],
+      PARTICULATE_FLOATS * 4,
+    );
+    this.motesGpu.setVertices(this.particulate.data, true);
+
     this.quadGpu = new Mesh(gl, this.blurProgram, [{ name: 'aPosition', size: 2, offset: 0 }], 8);
     this.quadGpu.setVertices(new Float32Array([-1, -1, 3, -1, -1, 3]));
 
@@ -323,22 +334,24 @@ export class Renderer {
     this.causticsGrid.setVertices(grid);
     this.causticsGrid.setIndices(gridIndices);
 
-    this.heightData = new Float32Array(world.water.nx * world.water.nz);
+    // Height and the two slopes per grid node, for the caustics.
+    this.heightData = new Float32Array(world.water.nx * world.water.nz * 4);
     this.heightTexture = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, this.heightTexture);
     gl.texImage2D(
       gl.TEXTURE_2D,
       0,
-      gl.R32F,
+      gl.RGBA32F,
       world.water.nx,
       world.water.nz,
       0,
-      gl.RED,
+      gl.RGBA,
       gl.FLOAT,
       this.heightData,
     );
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    // Read with texelFetch and interpolated in the shader (see SURFACE_SAMPLE).
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
@@ -528,7 +541,6 @@ export class Renderer {
     if (u.uWaterY) gl.uniform1f(u.uWaterY, TANK.waterY);
     if (u.uCausticsExtent) gl.uniform2f(u.uCausticsExtent, TANK.width / 2, TANK.depth);
     if (u.uTime) gl.uniform1f(u.uTime, time);
-    if (u.uRippleSteepness) gl.uniform1f(u.uRippleSteepness, RIPPLE_STEEPNESS);
 
     const L = this.lightDirWater;
     if (u.uLightDirWater) gl.uniform3f(u.uLightDirWater, L.x, L.y, L.z);
@@ -564,16 +576,23 @@ export class Renderer {
   }
 
   /** Refract light through the surface and accumulate where it lands. */
-  private renderCaustics(time: number): void {
+  private renderCaustics(): void {
     const gl = this.gl;
     const water = this.world.water;
 
     // Upload the current surface. The caustics are computed from *this* surface,
     // which is the whole point: a pellet hitting the water sends a ring through
     // the caustics because it sent a ring through the water.
-    for (let i = 0; i < this.heightData.length; i++) this.heightData[i] = water.height[i];
+    const height = water.height;
+    const slopeX = water.slopeX;
+    const slopeZ = water.slopeZ;
+    for (let i = 0; i < height.length; i++) {
+      this.heightData[i * 4] = height[i];
+      this.heightData[i * 4 + 1] = slopeX[i];
+      this.heightData[i * 4 + 2] = slopeZ[i];
+    }
     gl.bindTexture(gl.TEXTURE_2D, this.heightTexture);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, water.nx, water.nz, gl.RED, gl.FLOAT, this.heightData);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, water.nx, water.nz, gl.RGBA, gl.FLOAT, this.heightData);
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.causticsTarget.framebuffer);
     gl.viewport(0, 0, CAUSTIC_SIZE, CAUSTIC_SIZE);
@@ -588,14 +607,11 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.heightTexture);
     gl.uniform1i(u.uHeightMap!, 0);
-    gl.uniform2f(u.uGridSize!, water.nx, water.nz);
     gl.uniform2f(u.uTankExtent!, TANK.width / 2, TANK.depth);
     gl.uniform1f(u.uWaterY!, TANK.waterY);
     gl.uniform1f(u.uFloorY!, TANK.floorY);
     gl.uniform3f(u.uLightDir!, LIGHT_DIR.x, LIGHT_DIR.y, LIGHT_DIR.z);
     gl.uniform1f(u.uIOR!, OPTICS.iorWater);
-    gl.uniform1f(u.uTime!, time);
-    gl.uniform1f(u.uRippleSteepness!, RIPPLE_STEEPNESS);
     gl.disable(gl.CULL_FACE); // where the light folds over, triangles flip
     this.causticsGrid.draw();
 
@@ -803,6 +819,28 @@ export class Renderer {
 
     // --- Pellets ---
     this.renderParticles(time);
+
+    // --- Specks in the water ---
+    //
+    // Not in the mirrored pass: a reflection of something a fraction of a
+    // pixel across is lost in the ripples anyway.
+    if (!this.mirrored) this.renderMotes(time);
+  }
+
+  private renderMotes(time: number): void {
+    const gl = this.gl;
+    gl.enable(gl.BLEND);
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+    gl.depthMask(false);
+    gl.useProgram(this.moteProgram.program);
+    this.setSharedUniforms(this.moteProgram, time);
+    this.bindCaustics(this.moteProgram);
+    const u = this.moteProgram.uniforms;
+    if (u.uPixelScale) gl.uniform1f(u.uPixelScale, this.projection[5] * this.height * 0.5);
+    this.motesGpu.updateVertices(this.particulate.data);
+    this.motesGpu.draw(gl.POINTS);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
   }
 
   private renderParticles(time: number): void {
@@ -874,7 +912,6 @@ export class Renderer {
     if (u.uInverseViewProjection) {
       gl.uniformMatrix4fv(u.uInverseViewProjection, false, this.inverseViewProjection);
     }
-    if (u.uParticleDensity) gl.uniform1f(u.uParticleDensity, 0.35);
     this.quadGpu.draw();
   }
 
@@ -934,8 +971,12 @@ export class Renderer {
   render(camera: CameraState, time: number): void {
     this.resize();
     this.setCamera(camera);
+    // The specks are only for looking at, so they move with the frames drawn.
+    const dt = this.lastTime < 0 ? 0 : Math.min(0.05, Math.max(0, time - this.lastTime));
+    this.lastTime = time;
+    this.particulate.step(this.world.flow, dt);
     this.updateDynamicMeshes();
-    this.renderCaustics(time);
+    this.renderCaustics();
     this.renderShadows();
     this.renderReflection(time);
     this.renderScene(time);

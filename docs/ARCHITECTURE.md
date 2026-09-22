@@ -104,7 +104,13 @@ has one the phone does not have yet: **shadows**, drawn after the caustics. The
 body and the plants are rendered as depth from the light (after it bends at the
 surface), and the fins into a second map holding the light they let through.
 The scene shaders look both up, with a soft edge whose width grows with the gap
-between the thing casting the shadow and the surface receiving it.
+between the thing casting the shadow and the surface receiving it. The scene
+pass also draws a few hundred specks drifting in the water (`particulate.ts`),
+lit by the same caustics and shadows.
+
+The preview's water surface (`preview/src/sim/water.ts`) is also solved
+differently from the phone's: as the tank's standing waves, each advanced
+exactly, rather than as a wave equation on a grid. See spec §3.1.
 
 **Why the volume pass sits where it does.** It has to come after the scene and
 before the surface, because the absorption applies to light travelling from the

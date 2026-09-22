@@ -314,14 +314,55 @@ photon/ray-bundle construction; the reason for doing it rather than scrolling a
 caustics texture is that these caustics *are* the water surface, so when you tilt
 the phone and the water sloshes, the light on the floor sloshes with it.
 
-The simulated height field alone turned out to be nearly useless for this: its
-cells are 4.4 mm across and its waves are long and shallow, so the light it
-focuses varies by about 2% across the floor. The network of bright lines in a
-real tank comes from ripples one to five centimetres long, which curve the
-surface enough to bring light to a focus at a depth of a few centimetres. Those
-are added as a sum of travelling waves obeying the capillary-gravity dispersion
-relation (`omega^2 = g k + (sigma / rho) k^3`), and the surface shader uses the
-same waves so the light on the floor and the surface above it agree.
+The network of bright lines in a real tank comes from ripples one to five
+centimetres long, which curve the surface enough to bring light to a focus at a
+depth of a few centimetres. The grid wave equation gets those badly wrong: it
+moves every wave at the long-wave speed, 0.91 m/s, where a three-centimetre
+ripple really travels at about 0.25 m/s, and it had no source of small ripples
+away from the outlet, so the light it focused varied by only about 2% across the
+floor.
+
+The desktop preview therefore solves the surface a different way. A rectangular
+tank with vertical walls has a known set of standing waves (cosines across each
+direction), and each one oscillates independently at the frequency linear
+water-wave theory gives, `omega^2 = (g k + (sigma / rho) k^3) tanh(k h)`, which
+is right from the whole-tank slosh down to ripples where surface tension
+matters. Each is advanced as an exact damped oscillator. Short waves are damped
+by the organic film on every aquarium's surface, at about `k sqrt(nu omega / 8)`
+(Lamb 1932; Miles 1967), which is what stops a tank glittering all over. The
+filter's return stream keeps the surface moving: a few patches at the outlet
+pushed by band-limited noise, and small random pushes to every mode across the
+surface standing in for the eddies the current carries, sized to give an rms
+slope of 0.10 centred on 5 cm ripples. Nothing is added to the surface after
+that; the caustics come from the simulated ripples alone.
+
+The ripple length is a trade between calm and crisp. Sharp bright lines on the
+sand need ripples short enough to bring light to a focus within the 8.5 cm of
+water, about a centimetre at these slopes (a gentle ripple focuses light at
+roughly `4 / (slope * k)` below it), and those rise and fall fifteen to thirty
+times a second. Five-centimetre ripples give a softer, slower dappling.
+Measured on the rendered caustic map, each spot of sand goes bright-dark-bright
+about 7 times a second with these settings, against about 21 with the fixed
+waves below.
+
+An earlier version added twelve fixed travelling waves, down to 9 mm long, on
+top of the grid simulation. That looked too flickery: the curvature a wave adds
+grows with how short it is, so the shortest waves drew most of the pattern, and
+a 9 mm ripple rises and falls 28 times a second.
+
+### Specks in the water
+
+Fresh water in a planted tank carries fine detritus, a few tenths of a
+millimetre across. The desktop preview simulates 900 of them (about 120 per
+litre, a judgement for a clean filtered tank, not a measured figure): carried by
+the bulk flow, settling at their Stokes speed, jostled slightly by small-scale
+turbulence, and put back into the water when they reach the sand. Each is lit
+by the caustics and shadows where it is. Particles many times larger than the
+wavelength of light remove twice the light falling on their outline, half by
+diffraction into a narrow forward cone and half reflected and refracted in all
+directions; that is the brightness model. They are smaller than a pixel from any
+normal distance, so each is drawn two pixels wide with its light spread over
+that area.
 
 ### The fish's colour
 
