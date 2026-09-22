@@ -56,6 +56,7 @@ import {
   VERTEX_STRIDE,
   billboard,
 } from './meshes.js';
+import { visiblePanes } from './refraction.js';
 import { World } from '../sim/world.js';
 import { OPTICS, TANK, TANK_MIN_Z } from '../sim/config.js';
 import {
@@ -121,6 +122,18 @@ export class Renderer {
   private clipSide = 0;
   /** Index applied to geometry seen through the panes; 1 in the reflection pass. */
   private refractIOR: number = OPTICS.iorWater;
+  /** How far above the still waterline still counts as water; see uTopSlack. */
+  private topSlack = 0;
+  /**
+   * The pane of the tank the current pass looks through, as its outward
+   * normal; zero in the pass that draws what is out of the water.
+   */
+  private readonly pane = v3();
+  /**
+   * The top of the water box refraction works in: the waterline, except in
+   * the reflection pass (see renderReflection).
+   */
+  private waterTop: number = TANK.waterY;
   private mirrored = false;
   private volumeTarget!: RenderTarget;
   private surfaceTarget!: RenderTarget;
@@ -374,8 +387,10 @@ export class Renderer {
 
     if (u.uCausticNorm) gl.uniform1f(u.uCausticNorm, this.causticNorm);
     if (u.uWaterMin) gl.uniform3f(u.uWaterMin, -TANK.width / 2, TANK.floorY, TANK_MIN_Z);
-    if (u.uWaterMax) gl.uniform3f(u.uWaterMax, TANK.width / 2, TANK.waterY, 0);
+    if (u.uWaterMax) gl.uniform3f(u.uWaterMax, TANK.width / 2, this.waterTop, 0);
     if (u.uRefractIOR) gl.uniform1f(u.uRefractIOR, this.refractIOR);
+    if (u.uTopSlack) gl.uniform1f(u.uTopSlack, this.topSlack);
+    if (u.uPane) gl.uniform3f(u.uPane, this.pane.x, this.pane.y, this.pane.z);
     if (u.uClipSide) gl.uniform1f(u.uClipSide, this.clipSide);
     if (u.uFilmThickness) gl.uniform1f(u.uFilmThickness, OPTICS.filmThicknessNm);
     if (u.uFilmIOR) gl.uniform1f(u.uFilmIOR, OPTICS.iorFilm);
@@ -456,9 +471,36 @@ export class Renderer {
     gl.clearDepth(1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     this.clipSide = 0;
-    this.refractIOR = OPTICS.iorWater;
     this.mirrored = false;
-    this.drawSceneGeometry(time);
+    const passes = this.refractionPasses();
+    if (passes) {
+      for (const pane of passes) {
+        copy(this.pane, pane);
+        this.drawSceneGeometry(time);
+      }
+    } else {
+      // From inside the water nothing between the eye and the scene bends it.
+      this.refractIOR = 1;
+      this.drawSceneGeometry(time);
+    }
+    copy(this.pane, v3());
+    this.refractIOR = OPTICS.iorWater;
+  }
+
+  /**
+   * The passes the scene is drawn in: first one for what is out of the water,
+   * then one for each pane the eye can see into the water through — at most
+   * three, since at most three faces of a box face any one point. Null when
+   * the eye is in the water itself. See APPARENT_POSITION in the shaders for
+   * why each pane gets its own pass.
+   */
+  private refractionPasses(): Vec3[] | null {
+    const panes = visiblePanes(
+      this.cameraPos,
+      v3(-TANK.width / 2, TANK.floorY, TANK_MIN_Z),
+      v3(TANK.width / 2, this.waterTop, 0),
+    );
+    return panes.length > 0 ? [v3(), ...panes] : null;
   }
 
   /**
@@ -470,8 +512,14 @@ export class Renderer {
    * ripple normal, which is one. Only geometry on the far side of the water
    * from the real camera is drawn: from above, the rim of the glass and the
    * room; from below, the tank interior, which is what the underside of the
-   * surface shows past the critical angle. Refraction is off, because the
-   * mirror is inside the water and sees it directly.
+   * surface shows past the critical angle.
+   *
+   * From below, the mirror is itself seen through the front glass, so what it
+   * shows is bent by the glass like everything else, and has to be, or the
+   * reflection of a wall stops meeting the wall. Unfolded about the mirror,
+   * the path from an object to the eye is a straight line through a tank
+   * twice as tall, so that is the tank this pass refracts through. From
+   * above, the mirror shows the room, which no water bends.
    */
   private renderReflection(time: number): void {
     const gl = this.gl;
@@ -498,15 +546,26 @@ export class Renderer {
     gl.clearDepth(1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     this.clipSide = savedPos.y > wy ? 1 : -1;
-    this.refractIOR = 1;
     this.mirrored = true;
-    this.drawSceneGeometry(time);
+    this.waterTop = 2 * wy - TANK.floorY;
+    const passes = this.clipSide < 0 ? this.refractionPasses() : null;
+    if (passes) {
+      for (const pane of passes) {
+        copy(this.pane, pane);
+        this.drawSceneGeometry(time);
+      }
+    } else {
+      this.refractIOR = 1;
+      this.drawSceneGeometry(time);
+    }
 
     // Restore the real camera.
     copy(this.cameraPos, savedPos);
     this.viewProjection.set(savedVP);
     this.clipSide = 0;
     this.refractIOR = OPTICS.iorWater;
+    this.waterTop = TANK.waterY;
+    copy(this.pane, v3());
     this.mirrored = false;
   }
 
@@ -667,7 +726,17 @@ export class Renderer {
     this.waterGpu.updateVertices(this.waterMesh.vertices);
 
     gl.useProgram(this.waterProgram.program);
+    // The surface is refracted like everything else under water: from below,
+    // through the front glass, its underside is seen through the water and
+    // has to line up with the walls it meets. Its ripples rise a little above
+    // the still waterline and are still water, hence the slack; seen from
+    // above it lies on the pane it is seen through, and does not move.
+    this.topSlack = 0.02;
+    const passes = this.refractionPasses();
+    if (!passes) this.refractIOR = 1;
     this.setSharedUniforms(this.waterProgram, time);
+    this.topSlack = 0;
+    this.refractIOR = OPTICS.iorWater;
     const u = this.waterProgram.uniforms;
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.volumeTarget.texture);
@@ -677,9 +746,12 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.reflectionTarget.texture);
     if (u.uReflection) gl.uniform1i(u.uReflection, 2);
     if (u.uViewport) gl.uniform2f(u.uViewport, this.width, this.height);
-    // The surface itself is where it is; only what is seen through it shifts.
-    if (u.uRefractIOR) gl.uniform1f(u.uRefractIOR, 1);
-    this.waterGpu.draw();
+    // Once per pane, like the scene. The surface is never out of the water, so
+    // it skips the scene's first pass, the one for what is.
+    for (const pane of passes ? passes.slice(1) : [v3()]) {
+      if (u.uPane) gl.uniform3f(u.uPane, pane.x, pane.y, pane.z);
+      this.waterGpu.draw();
+    }
   }
 
   private renderPost(time: number): void {

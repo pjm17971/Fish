@@ -304,11 +304,33 @@ export function buildTankMesh(): { vertices: Float32Array; indices: Uint16Array 
     kind: number,
     uvScale = 1,
   ): void => {
-    const i0 = push(a, n, 0, 0, kind);
-    const i1 = push(b, n, uvScale, 0, kind);
-    const i2 = push(c, n, uvScale, uvScale, kind);
-    const i3 = push(d, n, 0, uvScale, kind);
-    idx.push(i0, i1, i2, i0, i2, i3);
+    // As a grid rather than two triangles. Refraction moves each vertex by a
+    // different amount (see apparentPosition in the shaders), and straight
+    // edges seen through the water really do bow; a wall drawn as one quad
+    // would stay flat and straight between its corners.
+    const S = 12;
+    const base = verts.length / VERTEX_FLOATS;
+    const p = v3();
+    for (let j = 0; j <= S; j++) {
+      for (let i = 0; i <= S; i++) {
+        const s = i / S;
+        const t = j / S;
+        // Bilinear across the quad a-b-c-d.
+        p.x = (1 - t) * ((1 - s) * a.x + s * b.x) + t * ((1 - s) * d.x + s * c.x);
+        p.y = (1 - t) * ((1 - s) * a.y + s * b.y) + t * ((1 - s) * d.y + s * c.y);
+        p.z = (1 - t) * ((1 - s) * a.z + s * b.z) + t * ((1 - s) * d.z + s * c.z);
+        push(p, n, s * uvScale, t * uvScale, kind);
+      }
+    }
+    for (let j = 0; j < S; j++) {
+      for (let i = 0; i < S; i++) {
+        const i0 = base + j * (S + 1) + i;
+        const i1 = i0 + 1;
+        const i3 = i0 + (S + 1);
+        const i2 = i3 + 1;
+        idx.push(i0, i1, i2, i0, i2, i3);
+      }
+    }
   };
 
   const x0 = TANK_MIN_X;
