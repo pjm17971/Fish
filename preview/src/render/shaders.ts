@@ -12,6 +12,12 @@
  * OPTICS in config.ts.
  */
 
+import { TANK } from '../sim/config.js';
+import { TANK_BOTTOM_Y, LAMP_Y, LAMP_HALF_DEPTH, DESK, ROOM } from './scenery.js';
+
+/** A number as a GLSL float literal. */
+const f = (x: number): string => (Number.isInteger(x) ? `${x}.0` : `${x}`);
+
 // ---------------------------------------------------------------------------
 // Shared chunks
 // ---------------------------------------------------------------------------
@@ -62,7 +68,7 @@ float causticLight(float raw, float strength) {
 // geometry, so this is analytic: a dark ceiling, and the hood lamp — a warm
 // strip above the tank — which is what a real aquarium surface reflects, as a
 // bright stretched streak that breaks up with every ripple.
-vec3 envColour(vec3 from, vec3 dir) {
+vec3 envRoom(vec3 dir) {
   // A lit room: a wall across from the tank, brighter towards the ceiling, so
   // that from a low viewing angle the surface has something to reflect. Made
   // near-black the first time, and from eye level the surface simply vanished.
@@ -72,13 +78,20 @@ vec3 envColour(vec3 from, vec3 dir) {
   // and a little above. This is what the surface of a tank on a desk shows.
   float win = max(0.0, dot(dir, normalize(vec3(0.0, 0.45, 1.0))));
   room += vec3(0.9, 0.88, 0.85) * pow(win, 6.0) * 0.55;
+  return room;
+}
+
+vec3 envColour(vec3 from, vec3 dir) {
+  vec3 room = envRoom(dir);
   if (dir.y <= 1e-4) return room;
   float lampY = uWaterMax.y + 0.16;
   float t = (lampY - from.y) / dir.y;
   vec3 hit = from + dir * t;
-  // A lamp the width of the tank, set back over its middle.
-  float inX = smoothstep(0.02, 0.0, abs(hit.x) - uWaterMax.x * 0.9);
-  float inZ = smoothstep(0.02, 0.0, abs(hit.z - (uWaterMin.z + uWaterMax.z) * 0.5) - 0.045);
+  // The lamp: a strip nearly the width of the tank, over its middle. The
+  // room mesh draws the same lamp (scenery.ts), so what the surface reflects
+  // is what is hanging there.
+  float inX = smoothstep(0.004, 0.0, abs(hit.x) - uWaterMax.x * 0.9);
+  float inZ = smoothstep(0.004, 0.0, abs(hit.z - (uWaterMin.z + uWaterMax.z) * 0.5) - ${f(LAMP_HALF_DEPTH)});
   vec3 lamp = vec3(1.0, 0.94, 0.82) * 2.6;
   return room + lamp * inX * inZ;
 }
@@ -141,11 +154,67 @@ float noise2(vec2 p) {
   return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
+float hash31(vec3 p) {
+  p = fract(p * vec3(0.1031, 0.1030, 0.0973));
+  p += dot(p, p.yxz + 33.33);
+  return fract((p.x + p.y) * p.z);
+}
+
+float noise3(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(mix(hash31(i), hash31(i + vec3(1, 0, 0)), f.x),
+        mix(hash31(i + vec3(0, 1, 0)), hash31(i + vec3(1, 1, 0)), f.x), f.y),
+    mix(mix(hash31(i + vec3(0, 0, 1)), hash31(i + vec3(1, 0, 1)), f.x),
+        mix(hash31(i + vec3(0, 1, 1)), hash31(i + vec3(1, 1, 1)), f.x), f.y),
+    f.z);
+}
+
 // Filmic tone mapping (Hejl-Burgess-Dawson), which keeps highlights from
 // clipping to flat white the way a plain clamp does.
 vec3 tonemap(vec3 x) {
   x = max(vec3(0.0), x - 0.004);
   return (x * (6.2 * x + 0.5)) / (x * (6.2 * x + 1.7) + 0.06);
+}
+`;
+
+/**
+ * Where a point *appears* to be from an eye outside the water.
+ *
+ * Light from a point inside the tank bends at the pane on its way out, and to
+ * the eye the point sits closer than it is: a tank 25 cm deep looks about 19.
+ * Every fish tank does this and it is one of the strongest cues that there is
+ * water behind the glass rather than air, because the sand, the plants and the
+ * fish all shift against the frame as the viewer moves.
+ *
+ * This is the paraxial result — the part of the path inside the water appears
+ * shortened by the index of refraction, along the line of sight — applied per
+ * vertex. Exact for near-normal viewing, and within a degree or two over the
+ * angles a person looks into a tank at.
+ *
+ * It applies to whatever part of the line of sight is in the water, not only
+ * to points inside it: the wall of the room seen *through* the tank is pulled
+ * forward by the tank's depth of water, and the same wall seen over the top of
+ * it is not, which is why a room seen through an aquarium breaks at the
+ * waterline.
+ */
+const APPARENT = /* glsl */ `
+vec3 apparentPosition(vec3 p) {
+  if (uRefractIOR <= 1.0) return p;
+  bool eyeInside = all(greaterThan(uCameraPos, uWaterMin)) && all(lessThan(uCameraPos, uWaterMax));
+  if (eyeInside) return p;
+  vec3 d = p - uCameraPos;
+  d += vec3(equal(d, vec3(0.0))) * 1e-7;
+  vec3 t0 = (uWaterMin - 1e-4 - uCameraPos) / d;
+  vec3 t1 = (uWaterMax + 1e-4 - uCameraPos) / d;
+  vec3 tn = min(t0, t1);
+  vec3 tf = max(t0, t1);
+  float tEnter = clamp(max(max(tn.x, tn.y), tn.z), 0.0, 1.0);
+  float tExit = clamp(min(min(tf.x, tf.y), tf.z), 0.0, 1.0);
+  float inWater = max(0.0, tExit - tEnter);
+  return p - d * inWater * (1.0 - 1.0 / uRefractIOR);
 }
 `;
 
@@ -214,40 +283,41 @@ out vec2 vUV;
 out vec2 vExtra;
 out vec3 vView;
 
-// Where a point under water *appears* to be from an eye outside it.
+// 1 while drawing the plants, whose aExtra.y is how far each vertex sways.
+uniform float uSway;
+uniform float uTime;
+
+${APPARENT}
+
+// Plants moving in the filter's current.
 //
-// Light from a point inside the tank bends at the pane on its way out, and to
-// the eye the point sits closer than it is: a tank 25 cm deep looks about 19.
-// Every fish tank does this and it is one of the strongest cues that there is
-// water behind the glass rather than air, because the sand, the plants and the
-// fish all shift against the frame as the viewer moves.
-//
-// This is the paraxial result — the part of the path inside the water appears
-// shortened by the index of refraction, along the line of sight — applied per
-// vertex. Exact for near-normal viewing, and within a degree or two over the
-// angles a person looks into a tank at.
-vec3 apparentPosition(vec3 p) {
-  if (uRefractIOR <= 1.0) return p;
-  bool eyeInside = all(greaterThan(uCameraPos, uWaterMin)) && all(lessThan(uCameraPos, uWaterMax));
-  bool pointInside = all(greaterThanEqual(p, uWaterMin - 1e-4)) && all(lessThanEqual(p, uWaterMax + 1e-4));
-  if (eyeInside || !pointInside) return p;
-  vec3 d = p - uCameraPos;
-  d += vec3(equal(d, vec3(0.0))) * 1e-7;
-  vec3 t0 = (uWaterMin - uCameraPos) / d;
-  vec3 t1 = (uWaterMax - uCameraPos) / d;
-  vec3 tn = min(t0, t1);
-  float tEnter = clamp(max(max(tn.x, tn.y), tn.z), 0.0, 1.0);
-  vec3 q = uCameraPos + d * tEnter;
-  return q + (p - q) / uRefractIOR;
+// Kinematic, not simulated: nothing here solves for the flow or for the
+// stems' stiffness, and the fish's own wake does not reach them. It is a
+// steady lean downstream, a slow swing whose phase travels across the tank
+// with the current (so neighbouring plants move together, a beat apart, as
+// they do in a real tank rather than each on its own), and a faster flutter
+// that runs up the length of a leaf. Each vertex's weight grows with the
+// square of its distance from the root, which is roughly how a flexible stem
+// fixed at one end deflects.
+vec3 swayOffset(vec3 p, float w) {
+  float travel = p.x * 18.0 - p.z * 7.0;
+  float t = uTime;
+  vec2 lean = vec2(0.40, 0.15);
+  vec2 swing = vec2(sin(t * 1.35 - travel), 0.55 * sin(t * 1.05 - travel * 0.8 + 1.7));
+  vec2 flutter = 0.22 * vec2(sin(t * 3.7 + p.y * 900.0 + travel * 2.3), cos(t * 3.1 + p.y * 700.0));
+  vec2 d = (lean + swing + flutter) * w * 0.7;
+  return vec3(d.x, 0.0, d.y);
 }
 
 void main() {
-  vWorldPos = aPosition;
+  vec3 p = aPosition;
+  if (uSway > 0.5) p += swayOffset(aPosition, aExtra.y);
+  vWorldPos = p;
   vNormal = normalize(aNormal);
   vUV = aUV;
   vExtra = aExtra;
-  vView = normalize(uCameraPos - aPosition);
-  gl_Position = uViewProjection * vec4(apparentPosition(aPosition), 1.0);
+  vView = normalize(uCameraPos - p);
+  gl_Position = uViewProjection * vec4(apparentPosition(p), 1.0);
 }
 `;
 
@@ -477,7 +547,15 @@ void main() {
 }
 `.replace('${RAY_COUNT}', '9');
 
-/** Substrate, walls, plants. `aExtra.x` selects which. */
+/** Shadow spheres the tank shader takes: the hardscape's and the fish's. */
+export const MAX_OCCLUDERS = 64;
+/** Of those, how many are the fish's, at the end. */
+export const FISH_OCCLUDERS = 3;
+
+/**
+ * Sand, the substrate seen through the glass, leaves, driftwood and stone.
+ * `aExtra.x` selects which (see SURFACE in scenery.ts).
+ */
 export const TANK_FRAG = /* glsl */ `#version 300 es
 ${COMMON}
 
@@ -492,7 +570,45 @@ uniform float uWaterY;
 uniform vec2 uCausticsExtent;
 uniform float uTime;
 
+// Spheres standing in for the stones, the wood and the fish: (centre, radius).
+uniform vec4 uOccluders[${MAX_OCCLUDERS}];
+uniform int uOccluderCount;
+
 out vec4 fragColour;
+
+// Soft shadow from the lamp. The lamp is a strip the width of the tank a few
+// centimetres above the water, so as seen from the sand it is large, and the
+// shadows it casts are soft and widen with distance from what casts them —
+// hence a penumbra that grows along the ray.
+float occluderShadow(vec3 p, vec3 L) {
+  float s = 1.0;
+  for (int i = 0; i < ${MAX_OCCLUDERS}; i++) {
+    if (i >= uOccluderCount) break;
+    vec4 o = uOccluders[i];
+    vec3 v = o.xyz - p;
+    float t = dot(v, L);
+    if (t <= 0.0) continue;
+    float d = length(v - L * t);
+    float pen = o.w * 0.3 + t * 0.18;
+    s *= mix(0.25, 1.0, smoothstep(o.w - pen, o.w + pen, d));
+  }
+  return s;
+}
+
+// Ambient occlusion: the darkening where things sit on the sand, from the
+// fraction of the sky each sphere hides (its solid angle, cosine-weighted).
+float occluderAO(vec3 p, vec3 N) {
+  float ao = 1.0;
+  for (int i = 0; i < ${MAX_OCCLUDERS}; i++) {
+    if (i >= uOccluderCount) break;
+    vec4 o = uOccluders[i];
+    vec3 v = o.xyz - p;
+    float d2 = max(dot(v, v), 1e-8);
+    float c = max(dot(N, v * inversesqrt(d2)), 0.0);
+    ao *= 1.0 - clamp(o.w * o.w / d2 * c, 0.0, 1.0) * 0.85;
+  }
+  return ao;
+}
 
 void main() {
   if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
@@ -500,9 +616,14 @@ void main() {
   vec3 V = normalize(vView);
   vec3 L = normalize(uLightDir);
   float kind = vExtra.x;
+  bool leaf = kind > 1.5 && kind < 2.95;
+  // Leaves are sheets, lit from whichever side faces us.
+  if (leaf && dot(N, V) < 0.0) N = -N;
 
   vec3 albedo;
   float roughness;
+  float ao = 1.0;
+  vec3 translucent = vec3(0.0);
 
   if (kind < 0.5) {
     // Sand. Individual grains, at two scales so it does not read as one texture
@@ -514,19 +635,102 @@ void main() {
     float dark = step(0.86, noise2(vUV * 900.0 + 13.0));
     albedo *= 1.0 - dark * 0.45;
     roughness = 0.9;
+    ao = occluderAO(vWorldPos, N);
   } else if (kind < 1.5) {
-    // Glass seen from inside, and the darkness beyond it.
-    albedo = vec3(0.04, 0.055, 0.06);
-    roughness = 0.25;
-  } else {
-    // Plant leaf. Translucent, with veins.
-    float vein = smoothstep(0.02, 0.0, abs(fract(vUV.x * 5.0) - 0.5) - 0.44);
-    albedo = mix(vec3(0.055, 0.16, 0.055), vec3(0.10, 0.26, 0.09), vUV.y);
-    albedo = mix(albedo, albedo * 1.5, vein);
+    // The substrate's cut face, pressed against the glass: dark soil at the
+    // bottom and the sand capping it, with a ragged boundary between them.
+    // Seen from outside through dry glass, so none of the water's light
+    // reaches it; only the room's.
+    vec2 q = vec2(vUV.x, vWorldPos.y);
+    float boundary = ${f(TANK_BOTTOM_Y + 0.011)} + 0.003 * (noise2(vec2(q.x * 90.0, 1.0)) - 0.5);
+    float soil = 1.0 - smoothstep(boundary - 0.0008, boundary + 0.0008, q.y);
+    float g = noise2(q * 2600.0) * 0.6 + noise2(q * 900.0) * 0.4;
+    vec3 sandCol = mix(vec3(0.20, 0.17, 0.14), vec3(0.42, 0.37, 0.30), g);
+    sandCol *= 1.0 - step(0.84, noise2(q * 1800.0 + 7.0)) * 0.45;
+    vec3 soilCol = mix(vec3(0.03, 0.022, 0.016), vec3(0.09, 0.065, 0.045), g);
+    soilCol += vec3(0.05, 0.04, 0.03) * step(0.9, noise2(q * 700.0 + 3.0));
+    // The top few millimetres are lit a little from above through the sand.
+    float nearTop = smoothstep(-0.006, 0.0, vWorldPos.y - ${f(TANK.floorY)});
+    vec3 c = mix(sandCol, soilCol, soil) * (uAmbient * 1.6 + vec3(0.06) + nearTop * 0.12);
+    fragColour = vec4(tonemap(c * uExposure), 1.0);
+    return;
+  } else if (leaf) {
+    int species = int(floor((kind - 2.0) * 10.0 + 0.5));
+    float along = vUV.y;
+    float across = abs(vUV.x - 0.5);
+    // Midrib, and secondary veins running out obliquely from it.
+    float midrib = 1.0 - smoothstep(0.0, 0.05, across);
+    float secondary = 1.0 - smoothstep(0.0, 0.07, abs(fract(along * 11.0 - across * 2.5) - 0.5) - 0.43);
+    float vein = max(midrib, secondary * 0.6);
+    float y = vWorldPos.y - ${f(TANK.floorY)};
     roughness = 0.55;
+    if (species == 0) {
+      // Amazon sword: fresh mid-green, paler along the veins.
+      albedo = mix(vec3(0.05, 0.15, 0.045), vec3(0.12, 0.28, 0.07), along);
+    } else if (species == 1) {
+      // Vallisneria: pale, thin, and very translucent, with fine parallel
+      // veins and tips browning where they trail at the surface.
+      albedo = mix(vec3(0.09, 0.22, 0.06), vec3(0.15, 0.30, 0.08), along);
+      albedo = mix(albedo, vec3(0.20, 0.20, 0.07), smoothstep(0.75, 1.0, along) * 0.5);
+      vein = (1.0 - smoothstep(0.0, 0.08, abs(fract(vUV.x * 4.0) - 0.5) - 0.40)) * 0.4;
+    } else if (species == 2) {
+      // Hairgrass: bright green blades.
+      albedo = mix(vec3(0.07, 0.20, 0.04), vec3(0.18, 0.40, 0.09), along);
+      vein = 0.0;
+    } else if (species == 3) {
+      // Red stem plant: green below, turning red towards the light, as
+      // Ludwigia and Rotala do when the light is strong.
+      float red = smoothstep(0.022, 0.058, y);
+      albedo = mix(vec3(0.09, 0.22, 0.05), vec3(0.42, 0.075, 0.05), red);
+      albedo = mix(albedo, albedo * vec3(1.2, 0.7, 0.8), along * 0.4);
+    } else if (species == 4) {
+      // Stem.
+      albedo = mix(vec3(0.16, 0.14, 0.06), vec3(0.34, 0.08, 0.05), smoothstep(0.02, 0.06, y));
+      vein = 0.0;
+    } else if (species == 5) {
+      // Java fern: dark, leathery and glossy, with a strong midrib.
+      albedo = mix(vec3(0.025, 0.085, 0.025), vec3(0.05, 0.14, 0.04), along);
+      roughness = 0.35;
+    } else {
+      // Cryptocoryne: olive with a bronze cast.
+      albedo = mix(vec3(0.07, 0.09, 0.035), vec3(0.14, 0.15, 0.05), along);
+    }
+    albedo = mix(albedo, albedo * 1.45, vein);
+    // Leaves are thin, and light that falls on one side comes through the
+    // other, coloured by the leaf.
+    translucent = albedo * 1.8;
+  } else if (kind < 3.5) {
+    // Driftwood. Streaks along the grain, deep cracks running with it, and a
+    // faint film of algae on the upper sides where the light falls.
+    float a = vUV.x * 6.2831853;
+    float s = vUV.y;
+    vec3 ring = vec3(cos(a), sin(a), 0.0);
+    float streak = noise3(ring * 2.5 + vec3(0.0, 0.0, s * 90.0)) * 0.6
+                 + noise3(ring * 7.0 + vec3(3.0, 1.0, s * 300.0)) * 0.4;
+    albedo = mix(vec3(0.035, 0.02, 0.012), vec3(0.15, 0.085, 0.048), streak);
+    float crack = smoothstep(0.62, 0.78, noise3(ring * 5.0 + vec3(0.0, 0.0, s * 22.0)));
+    albedo *= 1.0 - crack * 0.65;
+    float film = smoothstep(0.3, 0.9, N.y) * noise2(vWorldPos.xz * 300.0);
+    albedo = mix(albedo, vec3(0.11, 0.13, 0.06), film * 0.35);
+    roughness = 0.75;
+  } else {
+    // Stone: grey limestone, mottled, with pale calcite veins and a few
+    // darker pits.
+    vec3 q = vWorldPos;
+    float m = noise3(q * 160.0) * 0.6 + noise3(q * 520.0) * 0.4;
+    albedo = mix(vec3(0.22, 0.23, 0.23), vec3(0.50, 0.51, 0.50), m);
+    float v = 1.0 - smoothstep(0.0, 0.03, abs(noise3(q * 80.0 + 7.0) - 0.5));
+    albedo = mix(albedo, vec3(0.60, 0.60, 0.56), v * 0.65);
+    albedo *= 0.85 + 0.3 * noise3(q * 1500.0);
+    albedo = mix(albedo, vec3(0.09, 0.13, 0.06), smoothstep(0.6, 1.0, N.y) * 0.3 * noise3(q * 400.0));
+    roughness = 0.6;
   }
 
   float NdotL = max(dot(N, L), 0.0);
+  // Only the sand and the leaves take shadows from the spheres; the stones
+  // and the wood are what the spheres stand in for, and would shadow
+  // themselves wrongly.
+  float shadow = (kind < 0.5 || leaf) ? occluderShadow(vWorldPos, L) : 1.0;
 
   vec2 cuv = vec2(
     (vWorldPos.x + uCausticsExtent.x) / (2.0 * uCausticsExtent.x),
@@ -534,26 +738,190 @@ void main() {
   );
   float depthBelow = max(0.0, uWaterY - vWorldPos.y);
   float underWater = step(vWorldPos.y, uWaterY);
-  vec3 lit = uLightColour * NdotL
+  vec3 light = uLightColour * shadow * mix(1.0, ao, 0.5)
     * causticLight(texture(uCaustics, cuv).r,
                    0.9 * underWater * exp(-depthBelow * 1.2) * smoothstep(-0.2, 0.5, N.y));
-  vec3 colour = albedo * (lit + uAmbient);
+  vec3 colour = albedo * (light * NdotL + uAmbient * ao);
 
-  // Leaves are thin enough to glow when the light is behind them.
-  if (kind > 1.5) {
+  if (leaf) {
+    // Diffuse transmission: light on the far face of the leaf.
+    colour += translucent * light * max(-dot(N, L), 0.0) * 0.45;
+    // And the glow when looking towards the light through it.
     float back = pow(max(0.0, dot(V, -L)), 2.5);
-    colour += vec3(0.10, 0.30, 0.08) * back * uLightColour * 1.4;
+    colour += translucent * back * light * 0.9;
   }
 
-  // Specular from the wet sand and the leaf surfaces.
   vec3 H = normalize(V + L);
   float D = distributionGGX(max(dot(N, H), 0.0), roughness);
-  colour += uLightColour * D * 0.04 * NdotL;
+  colour += light * D * 0.04 * NdotL;
 
   colour *= transmittance(depthBelow);
   colour *= uWaterTint;
 
   fragColour = vec4(tonemap(colour * uExposure), 1.0);
+}
+`;
+
+/**
+ * The glass. Broad faces are nearly clear and reflect a little of the room,
+ * more at a glancing angle; the edges are the green of float glass seen
+ * end-on. Blended over what is behind.
+ */
+export const GLASS_FRAG = /* glsl */ `#version 300 es
+${COMMON}
+
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+in vec2 vExtra;
+in vec3 vView;
+
+uniform float uWaterY;
+
+out vec4 fragColour;
+
+void main() {
+  if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
+  vec3 N = normalize(vNormal);
+  vec3 V = normalize(vView);
+  if (dot(N, V) < 0.0) N = -N;
+  float NdotV = max(dot(N, V), 1e-4);
+
+  if (vExtra.x > 0.5) {
+    // An edge. Light from the lamp enters the top of the panes and is piped
+    // down them, so the edges are brighter near the top.
+    float top = smoothstep(uWaterY - 0.04, uWaterY + 0.03, vWorldPos.y);
+    vec3 green = vec3(0.17, 0.34, 0.30);
+    vec3 c = green * (uAmbient * 2.5 + uLightColour * (0.10 + 0.30 * top));
+    fragColour = vec4(tonemap(c * uExposure), 0.8);
+    return;
+  }
+
+  // A broad face: Fresnel reflection of the room, and a faint green cast.
+  float F = fresnelSchlick(NdotV, 0.04);
+  vec3 R = reflect(-V, N);
+  vec3 c = envColour(vWorldPos, R) + vec3(0.0, 0.012, 0.009);
+  fragColour = vec4(tonemap(c * uExposure), clamp(F + 0.03, 0.0, 0.85));
+}
+`;
+
+/**
+ * The room around the tank, and the lamp over it. `aExtra.x` selects the
+ * surface (see ROOM_SURFACE in scenery.ts).
+ *
+ * The room is lit by its own light — a window behind the viewer and the
+ * ceiling — not by the tank's lamp, and it is kept a good deal dimmer than
+ * the tank, which is how a lit aquarium looks in an ordinary room. Detail is
+ * soft on purpose: at this distance behind the tank, an eye focused on the
+ * fish sees the room out of focus.
+ */
+export const ROOM_FRAG = /* glsl */ `#version 300 es
+${COMMON}
+
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+in vec2 vExtra;
+in vec3 vView;
+
+out vec4 fragColour;
+
+const vec3 LAMP = vec3(0.0, ${f(LAMP_Y)}, ${f(TANK.depth * -0.5)});
+const vec2 TANK_HALF = vec2(${f(TANK.width / 2 + TANK.glassThickness)}, ${f(TANK.depth / 2 + TANK.glassThickness)});
+const float FLOOR_Y = ${f(ROOM.floorY)};
+const float CEILING_Y = ${f(ROOM.ceilingY)};
+
+vec3 roomLight(vec3 N) {
+  vec3 window = normalize(vec3(0.25, 0.3, 1.0));
+  float sky = 0.5 + 0.5 * N.y;
+  // Light bounced round the room, from the ceiling, and from the window.
+  return vec3(0.022, 0.021, 0.02)
+       + vec3(0.04, 0.04, 0.044) * sky
+       + vec3(0.085, 0.078, 0.07) * max(dot(N, window), 0.0);
+}
+
+// The lamp's light on what is near the tank, falling off with distance and
+// thrown mostly downwards.
+vec3 lampSpill(vec3 p, vec3 N) {
+  vec3 d = LAMP - p;
+  float r2 = dot(d, d);
+  vec3 dir = d * inversesqrt(r2);
+  float down = max(0.0, dir.y);
+  return vec3(0.95, 0.92, 0.84) * max(dot(N, dir), 0.0) * down * down * 0.012 / (r2 + 0.01);
+}
+
+// Wood grain along x, in metres.
+vec3 wood(vec2 q, vec3 dark, vec3 light) {
+  float g = noise2(vec2(q.x * 7.0, q.y * 150.0)) * 0.55 + noise2(vec2(q.x * 30.0, q.y * 600.0)) * 0.45;
+  float figure = noise2(vec2(q.x * 2.0 + g, q.y * 35.0));
+  return mix(dark, light, g * 0.7 + figure * 0.3);
+}
+
+void main() {
+  vec3 N = normalize(vNormal);
+  vec3 V = normalize(vView);
+  if (dot(N, V) < 0.0) N = -N;
+  vec3 p = vWorldPos;
+  int kind = int(vExtra.x + 0.5);
+
+  if (kind == 7) {
+    // The lamp's emitting strip.
+    fragColour = vec4(tonemap(vec3(1.0, 0.94, 0.82) * 2.6 * uExposure), 1.0);
+    return;
+  }
+
+  vec3 albedo;
+  float ao = 1.0;
+  float gloss = 0.0;
+  if (kind == 0) {
+    albedo = vec3(0.50, 0.48, 0.44);
+    // Darker into the corners and towards the floor.
+    ao = mix(0.7, 1.0, smoothstep(0.0, 0.6, p.y - FLOOR_Y));
+    ao *= mix(0.8, 1.0, smoothstep(0.0, 0.5, CEILING_Y - p.y));
+  } else if (kind == 1) {
+    // Floorboards running away from the viewer.
+    float board = floor(p.x / 0.14);
+    float along = p.z + hash21(vec2(board, 3.0)) * 2.0;
+    albedo = wood(vec2(along, p.x), vec3(0.10, 0.065, 0.04), vec3(0.24, 0.16, 0.10));
+    albedo *= 0.85 + 0.3 * hash21(vec2(board, 7.0));
+    float gap = smoothstep(0.004, 0.0, abs(fract(p.x / 0.14) - 0.5) - 0.495);
+    albedo *= 1.0 - gap * 0.6;
+    gloss = 0.4;
+  } else if (kind == 2 || kind == 3) {
+    // The desk: walnut, oiled.
+    albedo = wood(p.xz, vec3(0.085, 0.048, 0.028), vec3(0.24, 0.145, 0.085));
+    if (kind == 3) {
+      albedo *= 0.75;
+      // Cabinet door gaps.
+      float seam = smoothstep(0.003, 0.0, abs(abs(p.x) - 0.3)) + smoothstep(0.003, 0.0, abs(p.x));
+      albedo *= 1.0 - clamp(seam, 0.0, 1.0) * 0.7 * step(p.y, ${f(DESK.min.y - 0.001)});
+    } else {
+      // Contact shadow round the tank's footprint.
+      vec2 q = abs(p.xz - vec2(0.0, ${f(TANK.depth * -0.5)})) - TANK_HALF;
+      float outside = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+      ao = mix(0.45, 1.0, smoothstep(0.0, 0.035, outside));
+      gloss = 0.6;
+    }
+  } else if (kind == 4) {
+    albedo = vec3(0.55, 0.54, 0.52);
+  } else if (kind == 5) {
+    albedo = vec3(0.60, 0.59, 0.56);
+  } else {
+    // Lamp housing: dark anodised aluminium.
+    albedo = vec3(0.035, 0.036, 0.04);
+    gloss = 0.8;
+  }
+
+  vec3 c = albedo * (roomLight(N) + lampSpill(p, N)) * ao;
+  // A soft sheen off the varnished and metal surfaces, from the window.
+  if (gloss > 0.0) {
+    vec3 R = reflect(-V, N);
+    float F = fresnelSchlick(max(dot(N, V), 0.0), 0.04);
+    // The room only: the lamp's reflection in an oiled desk would be a blur,
+    // not the sharp strip envColour draws for the water surface.
+    c += envRoom(R) * F * gloss * 0.6;
+  }
+  fragColour = vec4(tonemap(c * uExposure), 1.0);
 }
 `;
 
@@ -847,8 +1215,10 @@ void main() {
   if (eyeInside) {
     underwater = min(apparentLength, max(0.0, tExit));
   } else if (tExit > tEnter && tEnter > 0.0 && apparentLength > tEnter) {
-    // Inside the box the apparent path is the true path over the index.
-    underwater = (apparentLength - tEnter) * max(1.0, uRefractIOR);
+    // Inside the box the apparent path is the true path over the index. For
+    // something beyond the water — the room seen through the tank — the path
+    // is the whole way across, and no further.
+    underwater = min((apparentLength - tEnter) * max(1.0, uRefractIOR), tExit - tEnter);
   }
 
 
@@ -872,7 +1242,9 @@ void main() {
     float n = noise2(p);
     motes += smoothstep(0.975, 1.0, n) * (1.0 - fi * 0.3);
   }
-  colour += vec3(0.8, 0.85, 0.8) * motes * uParticleDensity * (0.3 + phase * 2.0);
+  // Motes are in the water, so only where the line of sight passes through it.
+  colour += vec3(0.8, 0.85, 0.8) * motes * uParticleDensity * (0.3 + phase * 2.0)
+          * smoothstep(0.0, 0.02, underwater);
 
   fragColour = vec4(colour, 1.0);
 }
@@ -930,21 +1302,8 @@ uniform vec3 uWaterMax;
 uniform float uRefractIOR;
 out vec2 vUV;
 out vec3 vWorldPos;
-// Same apparent-depth shift as the scene geometry; see SCENE_VERT.
-vec3 apparentPosition(vec3 p) {
-  if (uRefractIOR <= 1.0) return p;
-  bool eyeInside = all(greaterThan(uCameraPos, uWaterMin)) && all(lessThan(uCameraPos, uWaterMax));
-  bool pointInside = all(greaterThanEqual(p, uWaterMin - 1e-4)) && all(lessThanEqual(p, uWaterMax + 1e-4));
-  if (eyeInside || !pointInside) return p;
-  vec3 d = p - uCameraPos;
-  d += vec3(equal(d, vec3(0.0))) * 1e-7;
-  vec3 t0 = (uWaterMin - uCameraPos) / d;
-  vec3 t1 = (uWaterMax - uCameraPos) / d;
-  vec3 tn = min(t0, t1);
-  float tEnter = clamp(max(max(tn.x, tn.y), tn.z), 0.0, 1.0);
-  vec3 q = uCameraPos + d * tEnter;
-  return q + (p - q) / uRefractIOR;
-}
+// Same apparent-depth shift as the scene geometry.
+${APPARENT}
 void main() {
   vUV = aUV;
   vWorldPos = aPosition;

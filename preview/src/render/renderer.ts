@@ -6,8 +6,9 @@
  *   1. **Caustics.** A grid of light rays is refracted through the current water
  *      surface and scattered additively onto a map of the tank floor, then
  *      blurred. This runs first because everything else reads it.
- *   2. **Scene.** Tank, plants, fish, fins, pellets — everything under the water
- *      — into an offscreen colour target with depth.
+ *   2. **Scene.** The room, the tank, its planting and hardscape, the fish,
+ *      the glass, the fins and the pellets, into an offscreen colour target
+ *      with depth.
  *   3. **Volume.** A full-screen pass that applies what the water does to light
  *      on its way out: Beer-Lambert absorption over the path length, and
  *      in-scattering from suspended particulate.
@@ -35,6 +36,10 @@ import {
   FISH_FRAG,
   FIN_FRAG,
   TANK_FRAG,
+  GLASS_FRAG,
+  ROOM_FRAG,
+  MAX_OCCLUDERS,
+  FISH_OCCLUDERS,
   WATER_FRAG,
   CAUSTICS_VERT,
   CAUSTICS_FRAG,
@@ -50,14 +55,20 @@ import {
   BodyMesh,
   FinMesh,
   WaterMesh,
-  buildTankMesh,
-  buildPlantsMesh,
   VERTEX_ATTRIBUTES,
   VERTEX_STRIDE,
   billboard,
 } from './meshes.js';
+import {
+  buildTankMesh,
+  buildGlassMesh,
+  buildHardscape,
+  buildPlantsMesh,
+  buildRoomMesh,
+  BuiltMesh,
+} from './scenery.js';
 import { World } from '../sim/world.js';
-import { OPTICS, TANK, TANK_MIN_Z } from '../sim/config.js';
+import { OPTICS, TANK, TANK_MIN_Z, FISH } from '../sim/config.js';
 import {
   Mat4,
   mat4,
@@ -89,6 +100,8 @@ export class Renderer {
   private readonly fishProgram: Program;
   private readonly finProgram: Program;
   private readonly tankProgram: Program;
+  private readonly glassProgram: Program;
+  private readonly roomProgram: Program;
   private readonly waterProgram: Program;
   private readonly causticsProgram: Program;
   private readonly blurProgram: Program;
@@ -105,6 +118,13 @@ export class Renderer {
   private readonly waterGpu: Mesh;
   private readonly tankGpu: Mesh;
   private readonly plantsGpu: Mesh;
+  private readonly hardscapeGpu: Mesh;
+  private readonly glassGpu: Mesh;
+  private readonly roomGpu: Mesh;
+  /** Shadow spheres: the hardscape's, fixed, then the fish's, each frame. */
+  private readonly occluders = new Float32Array(MAX_OCCLUDERS * 4);
+  private staticOccluderCount = 0;
+  private occluderCount = 0;
   private readonly particleGpu: Mesh;
   private readonly quadGpu: Mesh;
   private readonly causticsGrid: Mesh;
@@ -151,6 +171,8 @@ export class Renderer {
     this.fishProgram = createProgram(gl, SCENE_VERT, FISH_FRAG, 'fish');
     this.finProgram = createProgram(gl, SCENE_VERT, FIN_FRAG, 'fin');
     this.tankProgram = createProgram(gl, SCENE_VERT, TANK_FRAG, 'tank');
+    this.glassProgram = createProgram(gl, SCENE_VERT, GLASS_FRAG, 'glass');
+    this.roomProgram = createProgram(gl, SCENE_VERT, ROOM_FRAG, 'room');
     this.waterProgram = createProgram(gl, SCENE_VERT, WATER_FRAG, 'water');
     this.causticsProgram = createProgram(gl, CAUSTICS_VERT, CAUSTICS_FRAG, 'caustics');
     this.blurProgram = createProgram(gl, BLUR_VERT, BLUR_FRAG, 'blur');
@@ -181,15 +203,24 @@ export class Renderer {
     this.waterGpu.setVertices(this.waterMesh.vertices, true);
     this.waterGpu.setIndices(this.waterMesh.indices);
 
-    const tank = buildTankMesh();
-    this.tankGpu = new Mesh(gl, this.tankProgram, VERTEX_ATTRIBUTES, VERTEX_STRIDE);
-    this.tankGpu.setVertices(tank.vertices);
-    this.tankGpu.setIndices(tank.indices);
+    const staticMesh = (program: Program, built: BuiltMesh): Mesh => {
+      const m = new Mesh(gl, program, VERTEX_ATTRIBUTES, VERTEX_STRIDE);
+      m.setVertices(built.vertices);
+      m.setIndices(built.indices);
+      return m;
+    };
+    this.tankGpu = staticMesh(this.tankProgram, buildTankMesh());
+    this.plantsGpu = staticMesh(this.tankProgram, buildPlantsMesh());
+    const hardscape = buildHardscape();
+    this.hardscapeGpu = staticMesh(this.tankProgram, hardscape);
+    this.glassGpu = staticMesh(this.glassProgram, buildGlassMesh());
+    this.roomGpu = staticMesh(this.roomProgram, buildRoomMesh());
 
-    const plants = buildPlantsMesh();
-    this.plantsGpu = new Mesh(gl, this.tankProgram, VERTEX_ATTRIBUTES, VERTEX_STRIDE);
-    this.plantsGpu.setVertices(plants.vertices);
-    this.plantsGpu.setIndices(plants.indices);
+    // Leave room for the fish's own spheres at the end.
+    const fixed = hardscape.occluders.slice(0, MAX_OCCLUDERS - FISH_OCCLUDERS);
+    fixed.forEach((o, i) => this.occluders.set([o.x, o.y, o.z, o.r], i * 4));
+    this.staticOccluderCount = fixed.length;
+    this.occluderCount = fixed.length;
 
     this.particleGpu = new Mesh(
       gl,
@@ -451,7 +482,7 @@ export class Renderer {
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneTarget.framebuffer);
     gl.viewport(0, 0, this.width, this.height);
-    // The colour behind everything is the dark of a room behind the tank.
+    // The room covers the whole view; this only shows if it is not drawn.
     gl.clearColor(0.015, 0.02, 0.024, 1);
     gl.clearDepth(1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -520,14 +551,33 @@ export class Renderer {
     // A mirrored view reverses the winding of every triangle.
     gl.cullFace(this.mirrored ? gl.FRONT : gl.BACK);
 
-    // --- Tank and plants ---
+    // --- The room ---
+    //
+    // Not in the reflection: the surface's reflection of the room above it
+    // comes from envColour, which already has the ceiling and the lamp in it.
+    if (!this.mirrored) {
+      gl.disable(gl.CULL_FACE);
+      gl.useProgram(this.roomProgram.program);
+      this.setSharedUniforms(this.roomProgram, time);
+      this.roomGpu.draw();
+      gl.enable(gl.CULL_FACE);
+    }
+
+    // --- Substrate, hardscape and plants ---
     gl.useProgram(this.tankProgram.program);
     this.setSharedUniforms(this.tankProgram, time);
     this.bindCaustics(this.tankProgram);
+    const tu = this.tankProgram.uniforms;
+    if (tu.uOccluders) gl.uniform4fv(tu.uOccluders, this.occluders);
+    if (tu.uOccluderCount) gl.uniform1i(tu.uOccluderCount, this.occluderCount);
+    if (tu.uSway) gl.uniform1f(tu.uSway, 0);
     this.tankGpu.draw();
-    // Leaves are two-sided.
+    this.hardscapeGpu.draw();
+    // Leaves are two-sided, and move.
     gl.disable(gl.CULL_FACE);
+    if (tu.uSway) gl.uniform1f(tu.uSway, 1);
     this.plantsGpu.draw();
+    if (tu.uSway) gl.uniform1f(tu.uSway, 0);
 
     // --- Fish body ---
     gl.enable(gl.CULL_FACE);
@@ -544,6 +594,20 @@ export class Renderer {
     if (fu.uBellyColour) gl.uniform3f(fu.uBellyColour, 0.30, 0.10, 0.08);
     if (fu.uRoughness) gl.uniform1f(fu.uRoughness, OPTICS.mucusRoughness);
     this.bodyGpu.draw();
+
+    // --- Glass ---
+    //
+    // Blended over everything opaque, and before the fins so a fin in front
+    // of a pane is drawn over it rather than under it.
+    gl.disable(gl.CULL_FACE);
+    gl.enable(gl.BLEND);
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.depthMask(false);
+    gl.useProgram(this.glassProgram.program);
+    this.setSharedUniforms(this.glassProgram, time);
+    this.glassGpu.draw();
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
 
     // --- Fins ---
     //
@@ -698,9 +762,31 @@ export class Renderer {
     this.quadGpu.draw();
   }
 
+  /** Put the fish's spheres after the hardscape's, for its shadow on the sand. */
+  private updateFishOccluders(): void {
+    const loco = this.world.locomotion;
+    const fwd = loco.forward(v3());
+    const r = FISH.maxDepth * 0.45;
+    let i = this.staticOccluderCount;
+    for (const along of [0.3, 0, -0.3]) {
+      this.occluders.set(
+        [
+          loco.position.x + fwd.x * along * FISH.standardLength,
+          loco.position.y + fwd.y * along * FISH.standardLength,
+          loco.position.z + fwd.z * along * FISH.standardLength,
+          r,
+        ],
+        i * 4,
+      );
+      i++;
+    }
+    this.occluderCount = i;
+  }
+
   render(camera: CameraState, time: number): void {
     this.resize();
     this.setCamera(camera);
+    this.updateFishOccluders();
     this.renderCaustics();
     this.renderReflection(time);
     this.renderScene(time);

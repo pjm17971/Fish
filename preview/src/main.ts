@@ -60,8 +60,9 @@ canvas.addEventListener('pointermove', (e) => {
   lastX = e.clientX;
   lastY = e.clientY;
   camera.yaw -= dx * 0.005;
-  // Stop just short of straight up or down, where the look-at basis degenerates.
-  camera.pitch = Math.max(-1.2, Math.min(1.2, camera.pitch + dy * 0.005));
+  // Stop just short of straight up, where the look-at basis degenerates, and
+  // not far below the tank, where the desk it stands on is in the way.
+  camera.pitch = Math.max(-0.3, Math.min(1.2, camera.pitch + dy * 0.005));
 });
 
 canvas.addEventListener(

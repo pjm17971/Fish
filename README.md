@@ -93,7 +93,7 @@ To run the tests:
 
 ```sh
 cd preview
-npm test           # 41 tests
+npm test           # 48 tests
 ```
 
 ---
@@ -206,5 +206,15 @@ but not every one. Real fish miss constantly, and the missing is a good part of
 what makes feeding look alive, so this is only partly a defect — but the strike
 geometry is at the edge of reliable and it could be better.
 
-**One fish, one tank, and the plants do not move.** All three were in scope for
-"start with one fish" and none of them are hard to extend; they are just not done.
+**The scenery is for looking at, not for swimming round.** The desktop preview
+has driftwood, stones, seven kinds of plant and a room around the tank, but the
+fish cannot see any of it: it swims through leaves, and would swim through a
+stone if one were in its way. The stones are kept under a centimetre and a half,
+low enough for its body to pass over (its fins can still pass through), and the
+wood is low and to the back-left, which hides this most of the time, not always.
+The plants' sway is a kinematic motion, not a simulation of the current, and the
+fish's wake does not move them. All of this is preview-only for now; the phone
+app still has the original three plants.
+
+**One fish, one tank.** Both were in scope for "start with one fish" and neither
+is hard to extend; they are just not done.
