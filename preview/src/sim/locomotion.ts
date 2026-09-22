@@ -665,7 +665,25 @@ export class FishLocomotion {
     // it has to work to stay up there.
     let submerged = 1.0;
     if (water) {
-      const surfaceY = water.heightAt(this.position.x, this.position.z);
+      // The waterline along the whole body, not at one point. Ripples a few
+      // centimetres long put a crest over the head and a trough over the tail
+      // at the same moment; taking the height at the centre alone made every
+      // ripple that passed lift or drop the whole fish, and a fish feeding at
+      // the surface was bounced off its food.
+      quatRotate(scratch.axisF, this.orientation, AXIS_Z);
+      const m = this.morphology;
+      const front = m.comArc;
+      const back = m.standardLength - m.comArc;
+      let surfaceY = 0;
+      const samples = 5;
+      for (let i = 0; i < samples; i++) {
+        const along = front - ((front + back) * i) / (samples - 1);
+        surfaceY += water.heightAt(
+          this.position.x + scratch.axisF.x * along,
+          this.position.z + scratch.axisF.z * along,
+        );
+      }
+      surfaceY /= samples;
       const halfDepth = FISH.maxDepth * 0.5;
       submerged = clamp((surfaceY - (this.position.y - halfDepth)) / (2 * halfDepth), 0, 1);
     }
