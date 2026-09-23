@@ -118,6 +118,11 @@ export class WaterSurface {
   /** Nodal height changes gathered from displace() since the last step. */
   private readonly lift: Float32Array;
   private liftPending = false;
+  /** Where something under the water holds the surface, as modes; see holdSurface(). */
+  private readonly held: Float64Array;
+  private holding = false;
+  /** How far a steady pull on each mode moves it, against surface tension (g / (g + sigma k^2 / rho)). */
+  private readonly holdGain: Float64Array;
   /** Modal accelerations for a unit push at each outlet patch, and for a tilt. */
   private readonly outletShapes: Float64Array[] = [];
   private readonly outletNoise: { y: number; v: number }[] = [];
@@ -164,6 +169,8 @@ export class WaterSurface {
     for (let k = 0; k < count; k++) this.n[k * 3 + 1] = 1;
     this.force = new Float32Array(count);
     this.lift = new Float32Array(count);
+    this.held = new Float64Array(count);
+    this.holdGain = new Float64Array(count);
     this.amp = new Float64Array(count);
     this.rate = new Float64Array(count);
     this.omega2 = new Float64Array(count);
@@ -216,6 +223,7 @@ export class WaterSurface {
         const c = Math.cos(wd * dt);
         const s = Math.sin(wd * dt) / wd;
         this.omega2[idx] = w2;
+        this.holdGain[idx] = (GRAVITY * k * Math.tanh(k * WATER_DEPTH)) / w2;
         this.m00[idx] = e * (c + g * s);
         this.m01[idx] = e * s;
         this.m10[idx] = -e * w2 * s;
@@ -447,6 +455,29 @@ export class WaterSurface {
     }
   }
 
+  /**
+   * Where something moving under the water would hold the surface, as a height
+   * at each node, m: a fish swimming just below it, over which the water runs
+   * faster and the surface dips (World works the shape out). The surface is
+   * pulled towards this shape rather than set to it, so it follows a slow
+   * swimmer and lags, rocks and sends off ripples when the swimmer turns or
+   * darts, as real water does. Surface tension resists the sharpest parts of
+   * the shape: a one-centimetre dip is held to a quarter of the depth gravity
+   * alone would give it. Stays in force until the next call; pass null to
+   * release it.
+   */
+  holdSurface(field: Float32Array | null): void {
+    if (!field) {
+      this.holding = false;
+      return;
+    }
+    this.project(field, this.held);
+    const { held, holdGain } = this;
+    held[0] = 0; // the mean level stays where it is
+    for (let k = 1; k < held.length; k++) held[k] *= holdGain[k];
+    this.holding = true;
+  }
+
   private logTouch(x: number, z: number, amount: number, radius: number, kind: number): void {
     const o = (this.touchCount % TOUCH_LOG) * TOUCH_FIELDS;
     this.touchLog[o] = x;
@@ -530,6 +561,7 @@ export class WaterSurface {
     for (let k = 1; k < amp.length; k++) {
       // A tilt's resting shape is the tilted plane itself.
       let rest = tilted ? tx * this.tiltX[k] + tz * this.tiltZ[k] : 0;
+      if (this.holding) rest += this.held[k];
       if (shapes.length > 0) {
         let push = 0;
         for (let s = 0; s < shapes.length; s++) push += shapes[s][k] * noises[s].y;

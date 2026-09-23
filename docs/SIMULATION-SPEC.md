@@ -286,6 +286,16 @@ proportional to its vertical velocity, weighted by a `0.02 m` Gaussian and by se
 frontal area. A surface gulp therefore makes a real ring of ripples, because the fish's
 snout genuinely broke the surface.
 
+In the desktop preview a fish swimming horizontally just under the surface also
+holds it in a shallow dip (`World.holdSurfaceOverFish`). Each body slice is a
+doublet of the water it carries (its volume, plus its added mass when moving
+sideways), mirrored in the surface as if it were a lid; the height the surface
+is held to is `U . grad(phi) / g` along the lid, softened by surface tension
+and capped at `U^2 / 2g`. With the back 3 mm under at 10 cm/s this is a dip of
+about 0.08 mm, rising to a few tenths of a millimetre with the back almost at
+the surface. The fins are left out: counted as stiff plates they give dips of
+several millimetres, more than moving water can make.
+
 **Pellets.** A pellet crossing the surface injects an impulse into `du/dt` of
 `-0.05 * v_impact` over a `0.004 m` radius.
 
