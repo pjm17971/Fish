@@ -56,7 +56,8 @@ The same applies to the rest of it:
   they throw rings of light across the sand.
 - Fine specks drift in the desktop preview's water, carried by the current and
   settling slowly. They are nearly invisible until the lamp catches them.
-- In the desktop preview, the fish, its fins and the plants **cast shadows**
+- In the desktop preview, the fish, its fins, the plants, the driftwood and the
+  stones **cast shadows**
   that are sharp where they touch the sand and soften with height, which is
   how the eye judges how far above the floor something is. The fins' shadows
   are tinted red, because the fins are see-through and red.
@@ -105,7 +106,7 @@ To run the tests:
 
 ```sh
 cd preview
-npm test           # 49 tests
+npm test           # 56 tests
 ```
 
 ---
@@ -223,5 +224,15 @@ stops seven to nine millimetres under the pellet, right at the edge of the nine
 millimetres the suction strike can cover. A real betta angles up at the
 surface; this one barely pitches at all while it is swimming slowly.
 
-**One fish, one tank, and the plants do not move.** All three were in scope for
-"start with one fish" and none of them are hard to extend; they are just not done.
+**The scenery is for looking at, not for swimming round.** The desktop preview
+has driftwood, stones, seven kinds of plant and a room around the tank, but the
+fish cannot see any of it: it swims through leaves, and would swim through a
+stone if one were in its way. The stones are kept under a centimetre and a half,
+low enough for its body to pass over (its fins can still pass through), and the
+wood is low and to the back-left, which hides this most of the time, not always.
+The plants' sway is a kinematic motion, not a simulation of the current, and the
+fish's wake does not move them. All of this is preview-only for now; the phone
+app still has the original three plants.
+
+**One fish, one tank.** Both were in scope for "start with one fish" and neither
+is hard to extend; they are just not done.

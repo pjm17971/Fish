@@ -8,8 +8,9 @@
  *      blurred. This runs first because everything else reads it.
  *   1b. **Shadows.** Depth from the light's point of view for the solid things,
  *      and the light the fins let through, for everything else to look up.
- *   2. **Scene.** Tank, plants, fish, fins, pellets — everything under the water
- *      — into an offscreen colour target with depth.
+ *   2. **Scene.** The room, the tank, its planting and hardscape, the fish,
+ *      the glass, the fins and the pellets, into an offscreen colour target
+ *      with depth.
  *   3. **Volume.** A full-screen pass that applies what the water does to light
  *      on its way out: Beer-Lambert absorption over the path length, and
  *      in-scattering from suspended particulate.
@@ -37,6 +38,8 @@ import {
   FISH_FRAG,
   FIN_FRAG,
   TANK_FRAG,
+  GLASS_FRAG,
+  ROOM_FRAG,
   WATER_FRAG,
   CAUSTICS_VERT,
   CAUSTICS_FRAG,
@@ -56,13 +59,19 @@ import {
   BodyMesh,
   FinMesh,
   WaterMesh,
-  buildTankMesh,
-  buildPlantsMesh,
   VERTEX_ATTRIBUTES,
   VERTEX_STRIDE,
   billboard,
 } from './meshes.js';
 import { visiblePanes } from './refraction.js';
+import {
+  buildTankMesh,
+  buildGlassMesh,
+  buildHardscape,
+  buildPlantsMesh,
+  buildRoomMesh,
+  BuiltMesh,
+} from './scenery.js';
 import { World } from '../sim/world.js';
 import { Particulate, PARTICULATE_FLOATS } from './particulate.js';
 import { RippleLayer } from './ripples.js';
@@ -169,6 +178,8 @@ export class Renderer {
   private readonly fishProgram: Program;
   private readonly finProgram: Program;
   private readonly tankProgram: Program;
+  private readonly glassProgram: Program;
+  private readonly roomProgram: Program;
   private readonly waterProgram: Program;
   private readonly causticsProgram: Program;
   private readonly blurProgram: Program;
@@ -188,6 +199,9 @@ export class Renderer {
   private readonly waterGpu: Mesh;
   private readonly tankGpu: Mesh;
   private readonly plantsGpu: Mesh;
+  private readonly hardscapeGpu: Mesh;
+  private readonly glassGpu: Mesh;
+  private readonly roomGpu: Mesh;
   private readonly particleGpu: Mesh;
   private readonly quadGpu: Mesh;
   private readonly causticsGrid: Mesh;
@@ -265,6 +279,8 @@ export class Renderer {
     this.fishProgram = createProgram(gl, SCENE_VERT, FISH_FRAG, 'fish');
     this.finProgram = createProgram(gl, SCENE_VERT, FIN_FRAG, 'fin');
     this.tankProgram = createProgram(gl, SCENE_VERT, TANK_FRAG, 'tank');
+    this.glassProgram = createProgram(gl, SCENE_VERT, GLASS_FRAG, 'glass');
+    this.roomProgram = createProgram(gl, SCENE_VERT, ROOM_FRAG, 'room');
     this.waterProgram = createProgram(gl, SCENE_VERT, WATER_FRAG, 'water');
     this.causticsProgram = createProgram(gl, CAUSTICS_VERT, CAUSTICS_FRAG, 'caustics');
     this.blurProgram = createProgram(gl, BLUR_VERT, BLUR_FRAG, 'blur');
@@ -298,15 +314,17 @@ export class Renderer {
     this.waterGpu.setVertices(this.waterMesh.vertices, true);
     this.waterGpu.setIndices(this.waterMesh.indices);
 
-    const tank = buildTankMesh();
-    this.tankGpu = new Mesh(gl, this.tankProgram, VERTEX_ATTRIBUTES, VERTEX_STRIDE);
-    this.tankGpu.setVertices(tank.vertices);
-    this.tankGpu.setIndices(tank.indices);
-
-    const plants = buildPlantsMesh();
-    this.plantsGpu = new Mesh(gl, this.tankProgram, VERTEX_ATTRIBUTES, VERTEX_STRIDE);
-    this.plantsGpu.setVertices(plants.vertices);
-    this.plantsGpu.setIndices(plants.indices);
+    const staticMesh = (program: Program, built: BuiltMesh): Mesh => {
+      const m = new Mesh(gl, program, VERTEX_ATTRIBUTES, VERTEX_STRIDE);
+      m.setVertices(built.vertices);
+      m.setIndices(built.indices);
+      return m;
+    };
+    this.tankGpu = staticMesh(this.tankProgram, buildTankMesh());
+    this.plantsGpu = staticMesh(this.tankProgram, buildPlantsMesh());
+    this.hardscapeGpu = staticMesh(this.tankProgram, buildHardscape());
+    this.glassGpu = staticMesh(this.glassProgram, buildGlassMesh());
+    this.roomGpu = staticMesh(this.roomProgram, buildRoomMesh());
 
     this.particleGpu = new Mesh(
       gl,
@@ -688,12 +706,12 @@ export class Renderer {
   }
 
   /**
-   * The scene from the light: depth for the solid things (body, plants), then
-   * the fins' transmitted light. The tank itself is left out — the sand and
-   * the walls only receive shadow here, and a floor in its own shadow map is
-   * the usual source of speckled self-shadowing.
+   * The scene from the light: depth for the solid things (body, plants, wood
+   * and stones), then the fins' transmitted light. The sand is left out — it
+   * only receives shadow here, and a floor in its own shadow map is the usual
+   * source of speckled self-shadowing.
    */
-  private renderShadows(): void {
+  private renderShadows(time: number): void {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.shadowFramebuffer);
     gl.viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
@@ -710,7 +728,12 @@ export class Renderer {
     const u = this.shadowProgram.uniforms;
     gl.uniformMatrix4fv(u.uViewProjection!, false, this.lightViewProjection);
     if (u.uRefractIOR) gl.uniform1f(u.uRefractIOR, 1);
+    // The plants' shadows sway with them.
+    if (u.uTime) gl.uniform1f(u.uTime, time);
+    if (u.uSway) gl.uniform1f(u.uSway, 1);
     this.plantsGpu.draw();
+    if (u.uSway) gl.uniform1f(u.uSway, 0);
+    this.hardscapeGpu.draw();
     this.bodyGpu.draw();
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.finShadowTarget.framebuffer);
@@ -745,23 +768,16 @@ export class Renderer {
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.sceneTarget.framebuffer);
     gl.viewport(0, 0, this.width, this.height);
-    // The colour behind everything is the dark of a room behind the tank.
+    // The room covers the whole view; this only shows if it is not drawn.
     gl.clearColor(0.015, 0.02, 0.024, 1);
     gl.clearDepth(1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     this.clipSide = 0;
     this.mirrored = false;
     const passes = this.refractionPasses();
-    if (passes) {
-      for (const pane of passes) {
-        copy(this.pane, pane);
-        this.drawSceneGeometry(time);
-      }
-    } else {
-      // From inside the water nothing between the eye and the scene bends it.
-      this.refractIOR = 1;
-      this.drawSceneGeometry(time);
-    }
+    // From inside the water nothing between the eye and the scene bends it.
+    if (!passes) this.refractIOR = 1;
+    this.drawInPasses(passes, time);
     copy(this.pane, v3());
     this.refractIOR = OPTICS.iorWater;
   }
@@ -828,15 +844,8 @@ export class Renderer {
     this.mirrored = true;
     this.waterTop = 2 * wy - TANK.floorY;
     const passes = this.clipSide < 0 ? this.refractionPasses() : null;
-    if (passes) {
-      for (const pane of passes) {
-        copy(this.pane, pane);
-        this.drawSceneGeometry(time);
-      }
-    } else {
-      this.refractIOR = 1;
-      this.drawSceneGeometry(time);
-    }
+    if (!passes) this.refractIOR = 1;
+    this.drawInPasses(passes, time);
 
     // Restore the real camera.
     copy(this.cameraPos, savedPos);
@@ -848,7 +857,28 @@ export class Renderer {
     this.mirrored = false;
   }
 
-  private drawSceneGeometry(time: number): void {
+  /**
+   * Draw the scene once per refraction pass (or once, with no passes), in
+   * three rounds: everything solid in every pass, then the glass, then what
+   * is blended.
+   *
+   * The glass is see-through and does not write depth, so anything drawn
+   * after it that lies behind it paints over it. It is on the water's edges,
+   * so what is behind a pane is often drawn in another pane's pass; drawn in
+   * the same round as the solid things, a pane's reflection vanished wherever
+   * a later pass put something behind it. The fins and specks come last so
+   * that they, in turn, are drawn over the glass they are in front of.
+   */
+  private drawInPasses(passes: Vec3[] | null, time: number): void {
+    for (const round of ['solid', 'glass', 'blended'] as const) {
+      for (const pane of passes ?? [v3()]) {
+        copy(this.pane, pane);
+        this.drawSceneGeometry(time, round);
+      }
+    }
+  }
+
+  private drawSceneGeometry(time: number, round: 'solid' | 'glass' | 'blended'): void {
     const gl = this.gl;
     gl.viewport(0, 0, this.mirrored ? this.width >> 1 : this.width, this.mirrored ? this.height >> 1 : this.height);
     gl.enable(gl.DEPTH_TEST);
@@ -858,14 +888,42 @@ export class Renderer {
     // A mirrored view reverses the winding of every triangle.
     gl.cullFace(this.mirrored ? gl.FRONT : gl.BACK);
 
-    // --- Tank and plants ---
+    if (round === 'glass') {
+      this.drawGlass(time);
+      return;
+    }
+    if (round === 'blended') {
+      this.drawBlended(time);
+      return;
+    }
+
+    // --- The room ---
+    //
+    // Only in the pass for what is out of the water, which it all is. Not in
+    // the reflection: the surface's reflection of the room above it comes
+    // from envColour, which already has the ceiling and the lamp in it.
+    const dryPass = this.pane.x === 0 && this.pane.y === 0 && this.pane.z === 0;
+    if (!this.mirrored && dryPass) {
+      gl.disable(gl.CULL_FACE);
+      gl.useProgram(this.roomProgram.program);
+      this.setSharedUniforms(this.roomProgram, time);
+      this.roomGpu.draw();
+      gl.enable(gl.CULL_FACE);
+    }
+
+    // --- Substrate, hardscape and plants ---
     gl.useProgram(this.tankProgram.program);
     this.setSharedUniforms(this.tankProgram, time);
     this.bindCaustics(this.tankProgram);
+    const tu = this.tankProgram.uniforms;
+    if (tu.uSway) gl.uniform1f(tu.uSway, 0);
     this.tankGpu.draw();
-    // Leaves are two-sided.
+    this.hardscapeGpu.draw();
+    // Leaves are two-sided, and move.
     gl.disable(gl.CULL_FACE);
+    if (tu.uSway) gl.uniform1f(tu.uSway, 1);
     this.plantsGpu.draw();
+    if (tu.uSway) gl.uniform1f(tu.uSway, 0);
 
     // --- Fish body ---
     gl.enable(gl.CULL_FACE);
@@ -880,6 +938,32 @@ export class Renderer {
     if (fu.uBellyColour) gl.uniform3f(fu.uBellyColour, 0.30, 0.10, 0.08);
     if (fu.uRoughness) gl.uniform1f(fu.uRoughness, OPTICS.mucusRoughness);
     this.bodyGpu.draw();
+  }
+
+  /**
+   * The glass: first the edges, which are nearly opaque and write depth, so
+   * nothing behind one is drawn over it later; then the broad faces, which
+   * are nearly clear and do not, so the room and the tank show through them.
+   */
+  private drawGlass(time: number): void {
+    const gl = this.gl;
+    gl.disable(gl.CULL_FACE);
+    gl.enable(gl.BLEND);
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(this.glassProgram.program);
+    this.setSharedUniforms(this.glassProgram, time);
+    const u = this.glassProgram.uniforms;
+    if (u.uEdges) gl.uniform1f(u.uEdges, 1);
+    this.glassGpu.draw();
+    gl.depthMask(false);
+    if (u.uEdges) gl.uniform1f(u.uEdges, 0);
+    this.glassGpu.draw();
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+  }
+
+  private drawBlended(time: number): void {
+    const gl = this.gl;
 
     // --- Fins ---
     //
@@ -1083,7 +1167,7 @@ export class Renderer {
     this.updateDynamicMeshes();
     this.ripples.update();
     this.renderCaustics();
-    this.renderShadows();
+    this.renderShadows(time);
     this.renderReflection(time);
     this.renderScene(time);
     this.renderVolume(time);

@@ -10,7 +10,7 @@ docs/SIMULATION-SPEC.md          the numerical contract both ports implement
 preview/                         desktop: TypeScript + WebGL2
   src/sim/                       the simulation
   src/render/                    a preview renderer
-  src/test/                      49 tests, run with `npm test`
+  src/test/                      56 tests, run with `npm test`
 
 ios/Aquarium/                    phone: Swift + Metal + ARKit
   Sources/Sim/                   the same simulation, ported
@@ -135,6 +135,13 @@ of the tank shows up twice, as it does in a real one. `apparentPosition` in
 `shaders.ts` is the calculation; `refraction.ts` is the same thing in
 TypeScript, for the tests. The phone app does not do this yet.
 
+**The desktop preview has no camera image**, so it draws a room instead: walls,
+a desk for the tank to stand on, and the lamp over it (`preview/src/render/scenery.ts`).
+The glass is drawn as glass there too, clear with green edges, so the room shows
+through it. The room is out of the water, so it is drawn where it is, in the pass
+for what is out of the water. The driftwood, stones and extra planting are also
+preview-only so far; the Swift renderer still has the original three plants.
+
 Everything before the post pass works in half-float. The water and the thin-film
 colours on the fish's flanks both have a much wider range than eight bits can
 hold, and banding across a fish's flank is very visible.
@@ -200,7 +207,7 @@ knock through its lateral line.
 
 ## Testing
 
-`preview/src/test/` holds 49 tests in four files:
+`preview/src/test/` holds 56 tests in five files:
 
 - `physics.test.js` — conservation, stability, the water's sloshing period against
   the analytic result, pellet terminal velocity against Schiller-Naumann.
@@ -213,6 +220,10 @@ knock through its lateral line.
   tank looking shallower by the index of water, an upright stick looking
   shorter through the surface by the textbook ratio, and the double image at a
   corner.
+- `scenery.test.js` — that the stones, wood and plants stay inside the glass and
+  under the water (plants wherever the current sways them), that the stones are
+  low enough for a fish that cannot see them, and that the fish's resting spot is
+  clear.
 
 Every assertion is against a number derived independently — from the literature or
 analytically — and never against the output of a previous run. A test that asserts
