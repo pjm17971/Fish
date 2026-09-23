@@ -76,6 +76,19 @@ import {
 
 const CAUSTIC_SIZE = 256;
 
+/**
+ * Per fin: which outline the fin shader cuts from the simulated sheet, and how
+ * many bony rays to draw across it. The ray counts are a betta's, roughly: a
+ * dozen-odd in the tail, fewer in the dorsal, over twenty along the anal fin.
+ */
+const FIN_LOOK: Record<string, { shape: number; rays: number }> = {
+  caudal: { shape: 0, rays: 14 },
+  dorsal: { shape: 1, rays: 10 },
+  anal: { shape: 2, rays: 22 },
+  pelvicLeft: { shape: 3, rays: 1 },
+  pelvicRight: { shape: 3, rays: 1 },
+};
+
 export interface CameraState {
   /** Orbit angles, radians. */
   yaw: number;
@@ -619,7 +632,11 @@ export class Renderer {
     if (this.finProgram.uniforms.uFinColour) {
       gl.uniform3f(this.finProgram.uniforms.uFinColour, 0.52, 0.06, 0.09);
     }
+    const fu2 = this.finProgram.uniforms;
     for (let i = 0; i < this.finGpu.length; i++) {
+      const look = FIN_LOOK[this.world.fins[i].spec.name] ?? FIN_LOOK.pelvicLeft;
+      if (fu2.uFinShape) gl.uniform1f(fu2.uFinShape, look.shape);
+      if (fu2.uRayCount) gl.uniform1f(fu2.uRayCount, look.rays);
       this.finMeshes[i].update();
       this.finGpu[i].updateVertices(this.finMeshes[i].vertices);
       this.finGpu[i].draw();
