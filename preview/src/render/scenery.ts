@@ -401,18 +401,6 @@ export function buildGlassMesh(): BuiltMesh {
 // Hardscape: driftwood and stones
 // ---------------------------------------------------------------------------
 
-/**
- * A sphere that roughly fills part of a stone or a branch. The tank shader
- * uses these to cast soft shadows from the lamp and to darken the sand where
- * things sit on it.
- */
-export interface Occluder {
-  x: number;
-  y: number;
-  z: number;
-  r: number;
-}
-
 /** Evaluate a Catmull-Rom spline through `pts` at `t` in [0, 1]. */
 function catmullRom(pts: Vec3[], t: number): Vec3 {
   const n = pts.length - 1;
@@ -447,9 +435,9 @@ interface TubeOptions {
 
 /**
  * A tube along a spline, with frames carried along by parallel transport so
- * the rings do not twist. Returns the sampled spine, for occluders.
+ * the rings do not twist.
  */
-function tube(b: MeshBuilder, spine: Vec3[], o: TubeOptions): { p: Vec3; r: number }[] {
+function tube(b: MeshBuilder, spine: Vec3[], o: TubeOptions): void {
   // Arc length, roughly, to choose the sampling.
   let approx = 0;
   for (let i = 1; i < spine.length; i++) approx += len(sub(v3(), spine[i], spine[i - 1]));
@@ -470,7 +458,6 @@ function tube(b: MeshBuilder, spine: Vec3[], o: TubeOptions): { p: Vec3; r: numb
   let Nf = normalize(v3(), cross(v3(), cross(v3(), T, ref), T));
 
   const start = b.count;
-  const out: { p: Vec3; r: number }[] = [];
   let s = 0;
   for (let i = 0; i <= samples; i++) {
     const t = i / samples;
@@ -484,7 +471,6 @@ function tube(b: MeshBuilder, spine: Vec3[], o: TubeOptions): { p: Vec3; r: numb
     }
     const B = cross(v3(), T, Nf);
     const r = o.radius(t);
-    out.push({ p: pts[i], r });
     const sw = o.sway ? o.sway(t) : 0;
     for (let k = 0; k <= o.sides; k++) {
       const a = (k / o.sides) * Math.PI * 2;
@@ -515,7 +501,6 @@ function tube(b: MeshBuilder, spine: Vec3[], o: TubeOptions): { p: Vec3; r: numb
     const ti = b.vertex(tip, T, 0.5, s + o.radius(1), o.kind, o.sway ? o.sway(1) : 0);
     for (let k = 0; k < o.sides; k++) b.idx.push(last + k, last + k + 1, ti);
   }
-  return out;
 }
 
 interface Branch {
@@ -662,7 +647,7 @@ function icosphere(levels: number): { dirs: Vec3[]; tris: number[] } {
  * than worn, so it has flat faces meeting at edges, and noise alone never
  * produces those.
  */
-function addStone(b: MeshBuilder, s: Stone, sphere: { dirs: Vec3[]; tris: number[] }): Occluder[] {
+function addStone(b: MeshBuilder, s: Stone, sphere: { dirs: Vec3[]; tris: number[] }): void {
   const rng = new Rng(0x57013 + s.seed * 7919);
   const planes: { n: Vec3; d: number }[] = [];
   const cuts = 6 + rng.int(3);
@@ -702,25 +687,14 @@ function addStone(b: MeshBuilder, s: Stone, sphere: { dirs: Vec3[]; tris: number
     b.tri(start + sphere.tris[i], start + sphere.tris[i + 1], start + sphere.tris[i + 2]);
   }
   b.smoothNormals(start);
-
-  // Shadow proxies: a sphere a little smaller than the stone, centred low
-  // enough that its top roughly meets the stone's.
-  const r = Math.min(s.sx, s.sz) * 0.85;
-  const top = centreY + s.sy * 0.7;
-  return [{ x: s.x, y: Math.min(top - r * 0.8, centreY), z: s.z, r }];
 }
 
-export interface Hardscape extends BuiltMesh {
-  occluders: Occluder[];
-}
-
-export function buildHardscape(): Hardscape {
+export function buildHardscape(): BuiltMesh {
   const b = new MeshBuilder();
-  const occluders: Occluder[] = [];
 
   for (const [bi, br] of DRIFTWOOD.entries()) {
     const start = b.count;
-    const samples = tube(b, br.spine, {
+    tube(b, br.spine, {
       kind: SURFACE.wood,
       sides: 14,
       density: 420,
@@ -743,20 +717,12 @@ export function buildHardscape(): Hardscape {
       capEnd: br.capEnd,
     });
     b.smoothNormals(start);
-    // Spheres along the branch, a little under two radii apart: close enough
-    // that their soft shadows run together into one.
-    let last: Vec3 | null = null;
-    for (const sm of samples) {
-      if (last && len(sub(v3(), sm.p, last)) < Math.max(sm.r * 1.8, 0.007)) continue;
-      last = sm.p;
-      occluders.push({ x: sm.p.x, y: sm.p.y, z: sm.p.z, r: sm.r * 0.9 });
-    }
   }
 
   const sphere = icosphere(3);
-  for (const s of STONES) occluders.push(...addStone(b, s, sphere));
+  for (const s of STONES) addStone(b, s, sphere);
 
-  return { ...b.build(), occluders };
+  return b.build();
 }
 
 // ---------------------------------------------------------------------------

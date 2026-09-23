@@ -184,7 +184,7 @@ export function createRenderTarget(
   internalFormat: number,
   format: number,
   type: number,
-  filter = gl.LINEAR,
+  filter: number = gl.LINEAR,
 ): RenderTarget {
   const texture = gl.createTexture()!;
   gl.bindTexture(gl.TEXTURE_2D, texture);

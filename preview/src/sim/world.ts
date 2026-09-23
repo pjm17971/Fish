@@ -8,8 +8,8 @@
  * feel very slightly late, in a way that is almost impossible to find later.
  */
 
-import { Vec3, v3, set, copy, sub, scale, clamp } from './math.js';
-import { DEFAULT_WORLD_CONFIG, TANK, WATER, WorldConfig } from './config.js';
+import { Vec3, v3, set, copy, sub, scale, clamp, smoothstep, expApproachV } from './math.js';
+import { DEFAULT_WORLD_CONFIG, GRAVITY, TANK, WATER, WorldConfig } from './config.js';
 import { buildMorphology, Morphology } from './morphology.js';
 import { FishBody, MotorCommand, createMotorCommand } from './fishBody.js';
 import { FishLocomotion, createLocomotion } from './locomotion.js';
@@ -30,6 +30,8 @@ const scratch = {
   tmp: v3(),
   segWorld: v3(),
   segVel: v3(),
+  axis: v3(),
+  dipole: v3(),
   prevViewer: v3(),
 };
 
@@ -61,6 +63,11 @@ export class World {
   private hasPrevViewer = false;
   private lastTapTime = -Infinity;
 
+  /** Where the fish holds the surface, at each node, m; see holdSurfaceOverFish(). */
+  private readonly surfaceHold: Float32Array;
+  /** The fish's velocity averaged over about a tail beat, m/s. */
+  private readonly glideVelocity = v3();
+
   constructor(config: Partial<WorldConfig> = {}) {
     this.config = { ...DEFAULT_WORLD_CONFIG, ...config };
     this.morphology = buildMorphology();
@@ -68,6 +75,7 @@ export class World {
     this.locomotion = createLocomotion(this.morphology, this.body);
     this.fins = buildFins(this.morphology);
     this.water = new WaterSurface();
+    this.surfaceHold = new Float32Array(this.water.nx * this.water.nz);
     this.flow = new BulkFlow(this.config.seed);
     this.food = new FoodSystem(this.config.seed);
     this.brain = new FishBrain(this.config);
@@ -165,6 +173,8 @@ export class World {
     }
     if (this.brain.gulpedThisTick) {
       this.releaseBubble();
+      this.locomotion.toWorld(this.body.snout(scratch.tmp), scratch.segWorld);
+      this.water.displace(scratch.segWorld.x, scratch.segWorld.z, -WATER.gulpVolume, WATER.gulpRadius);
     }
 
     // 4. Physics. The fish first, so the fins and the water see where it
@@ -177,6 +187,7 @@ export class World {
 
     // 5. The fish disturbs the surface it just moved through.
     this.coupleFishToSurface(frameDt);
+    this.holdSurfaceOverFish(frameDt);
 
     // 6. Food, then the water it landed in.
     this.food.step(this.water, this.flow, frameDt);
@@ -230,6 +241,163 @@ export class World {
         0.012,
       );
     }
+  }
+
+  /**
+   * The small dip a fish makes in the surface as it swims along just under it.
+   *
+   * Water has to get out of the fish's way. Above a fish cruising a centimetre
+   * down it runs over the fish's back faster than the water around it, and
+   * faster water is at lower pressure, so the surface there sags a little; just
+   * ahead of the snout and behind the tail the water is slowed and the surface
+   * stands a little higher. With the fish's back a few millimetres under, at
+   * cruising speed, this is a few tenths of a millimetre, too little to see, but the surface bends the light
+   * like a weak lens and the sand shows a soft patch moving with the fish.
+   *
+   * The calculation is the textbook one for a body moving under a surface slow
+   * enough that the surface barely gives. Each slice of the fish moves some
+   * water with it (its own volume, plus the water it drags when it moves
+   * sideways), which from a distance looks like a doublet — a source and a sink
+   * side by side. The surface is treated as a flat lid, which doubles that flow
+   * at the lid (a mirror image of the fish above it), and the height the
+   * surface would take there is the slice's velocity times the slope of the
+   * flow potential along the lid, over g: the dip that travels with a body
+   * moving steadily. The water then follows that shape with its own dynamics
+   * (see WaterSurface.holdSurface), so below 23 cm/s — the slowest a ripple can
+   * run — the dip simply travels with the fish, and when the fish turns away
+   * or dives, the surface it was holding springs back and rings a little.
+   *
+   * Some things are left out. The fish speeding up and slowing down also
+   * changes the pressure at the surface, but it does so with every tail beat,
+   * and computed frame by frame it jittered enough to set the surface ringing
+   * by millimetres; the tail's beat and the body's turning are left out for
+   * the same reason (see below). And only horizontal motion counts; the fish
+   * rising or sinking near the surface is coupleFishToSurface's.
+   */
+  private holdSurfaceOverFish(dt: number): void {
+    const water = this.water;
+    const hold = this.surfaceHold;
+    const segs = this.body.segments;
+    const morph = this.morphology.segments;
+    const reach = WATER.fishHoldReach;
+    const deepest = WATER.fishHoldDepth;
+    // The picture here is of a body gliding steadily along, so it takes the
+    // fish's speed averaged over about one beat of its tail (a brisk cruise
+    // is three beats a second). The speed itself surges with every beat and
+    // jumps when the fish darts or bumps the glass; followed frame by frame
+    // it set the surface ringing.
+    const glide = expApproachV(this.glideVelocity, this.glideVelocity, this.locomotion.velocity, 3, dt);
+    let live = false;
+    hold.fill(0);
+    for (let i = 0; i < segs.length; i++) {
+      const st = segs[i];
+      const sg = morph[i];
+      this.locomotion.toWorld(st.pos, scratch.segWorld);
+      const centreDepth = water.heightAt(scratch.segWorld.x, scratch.segWorld.z) - scratch.segWorld.y;
+      const halfHeight = 0.5 * sg.depth;
+      if (centreDepth - halfHeight > deepest) continue;
+
+      // The fish's gliding speed, the same for every slice. The tail's beat
+      // and the body's swing as it turns are back-and-forth motions this
+      // picture cannot describe: counted as if each slice were gliding at
+      // its own speed, they gave dips of millimetres whenever the fish
+      // turned at the surface, and a ring after it like a stone dropped in.
+      copy(scratch.segVel, glide);
+
+      // Its doublet: the water it carries along each of its own axes, times
+      // its speed along that axis. Endways only its own volume; sideways and
+      // up-and-down also the water it drags with it (added mass, pi/4 of the
+      // square of its depth or width per unit length).
+      //
+      // The body only, not the fins. Counted as stiff plates, the betta's
+      // long fins drag some twenty times the body's volume of water sideways,
+      // and the dip came out at 2 to 9 mm when the fish turned near the
+      // surface. That cannot be right: moving water can lower the surface by
+      // at most about speed^2 / 2g, half a millimetre at 10 cm/s. The fins are
+      // thin, loose membranes that fold and trail with the water rather than
+      // shove it like a stiff plate; how much they do push is not something
+      // this simple picture can say, so they are left out.
+      const volume = sg.area * sg.ds;
+      const sideways = volume + 0.25 * Math.PI * sg.depth * sg.depth * sg.ds;
+      const upwards = volume + 0.25 * Math.PI * sg.width * sg.width * sg.ds;
+      set(scratch.dipole, 0, 0, 0);
+      this.locomotion.dirToWorld(st.tangent, scratch.axis);
+      addAlong(scratch.dipole, scratch.axis, volume * dotV(scratch.segVel, scratch.axis));
+      this.locomotion.dirToWorld(st.normal, scratch.axis);
+      addAlong(scratch.dipole, scratch.axis, sideways * dotV(scratch.segVel, scratch.axis));
+      this.locomotion.dirToWorld(st.up, scratch.axis);
+      addAlong(scratch.dipole, scratch.axis, upwards * dotV(scratch.segVel, scratch.axis));
+      if (scratch.dipole.x === 0 && scratch.dipole.z === 0) continue;
+
+      // A slice can be taller than it is deep under the surface, so it is
+      // not one point: spread its doublet over its height, most in
+      // the middle and none at the tips (as the flow round a flat plate
+      // has it), and let each part act from its own depth. Parts out of
+      // the water drop out. Close to the lid a point over-states a body of
+      // any thickness, and the surface grid cannot show anything much
+      // narrower than its spacing, so each point is softened by the
+      // slice's half-width and half a grid spacing.
+      const core = 0.25 * (sg.width * sg.width + water.dx * water.dx);
+      this.locomotion.dirToWorld(st.up, scratch.axis);
+      for (let q = 1; q <= HOLD_POINTS; q++) {
+        const angle = (q * Math.PI) / (HOLD_POINTS + 1);
+        const along = Math.cos(angle) * halfHeight;
+        // Gauss-Chebyshev weights for a half-ellipse, summing to 1.
+        const share = ((2 / (HOLD_POINTS + 1)) * Math.sin(angle) * Math.sin(angle));
+        const x0 = scratch.segWorld.x + scratch.axis.x * along;
+        const z0 = scratch.segWorld.z + scratch.axis.z * along;
+        const depth = centreDepth - scratch.axis.y * along;
+        // In the water, and not so deep it no longer matters.
+        const weight = share * smoothstep(0, 0.002, depth) * (1 - smoothstep(0.6 * deepest, deepest, depth));
+        if (weight <= 0) continue;
+        live = true;
+        // Doubled by the mirror image above the lid, over 4 pi for a doublet,
+        // and then over g, and times the slice's own speed, for the height.
+        const mx = (2 * weight * scratch.dipole.x) / (4 * Math.PI * GRAVITY);
+        const mz = (2 * weight * scratch.dipole.z) / (4 * Math.PI * GRAVITY);
+        const ux = scratch.segVel.x;
+        const uz = scratch.segVel.z;
+        const lift = depth * depth + core;
+        const i0 = Math.max(0, Math.floor((x0 - reach - water.worldX(0)) / water.dx));
+        const i1 = Math.min(water.nx - 1, Math.ceil((x0 + reach - water.worldX(0)) / water.dx));
+        const j0 = Math.max(0, Math.floor((z0 - reach - water.worldZ(0)) / water.dz));
+        const j1 = Math.min(water.nz - 1, Math.ceil((z0 + reach - water.worldZ(0)) / water.dz));
+        for (let j = j0; j <= j1; j++) {
+          const rz = water.worldZ(j) - z0;
+          for (let ii = i0; ii <= i1; ii++) {
+            const rx = water.worldX(ii) - x0;
+            const flat = rx * rx + rz * rz;
+            // Taper the far edge so the patch moving with the fish does not
+            // leave a step behind it.
+            const edge = 1 - smoothstep(0.5 * reach * reach, reach * reach, flat);
+            if (edge <= 0) continue;
+            const r2 = flat + lift;
+            const inv3 = 1 / (r2 * Math.sqrt(r2));
+            // The flow potential here is -(m . r) / r^3; the surface stands
+            // at the slice's velocity dotted with its slope along the lid.
+            const mr = (3 * (mx * rx + mz * rz)) / r2;
+            hold[water.index(ii, j)] += edge * inv3 * (ux * (mr * rx - mx) + uz * (mr * rz - mz));
+          }
+        }
+      }
+    }
+
+    // The picture above is for water that is disturbed only a little, and
+    // it breaks down when the fish's back comes within a few millimetres of
+    // the surface, where it can call for more than moving water can do.
+    // Water moving at speed u lowers the surface by u^2 / 2g, and past a body
+    // it runs at most about one and a half times the body's own speed, so
+    // the most the fish can do is about half of U^2 / g. Hold the shape to
+    // that, easing into the limit rather than cutting it off.
+    const limit = (0.5 * (glide.x * glide.x + glide.z * glide.z)) / GRAVITY;
+    if (live && limit > 1e-7) {
+      for (let k = 0; k < hold.length; k++) {
+        if (hold[k] !== 0) hold[k] = limit * Math.tanh(hold[k] / limit);
+      }
+    } else {
+      live = false;
+    }
+    water.holdSurface(live ? hold : null);
   }
 
   private releaseBubble(): void {
@@ -315,3 +483,16 @@ export function rayToWaterSurface(
 }
 
 export type { Morphology, MotorCommand, Stimuli };
+
+/** Points each slice is spread over, top to bottom. */
+const HOLD_POINTS = 5;
+
+function addAlong(out: Vec3, axis: Vec3, amount: number): void {
+  out.x += axis.x * amount;
+  out.y += axis.y * amount;
+  out.z += axis.z * amount;
+}
+
+function dotV(a: Vec3, b: Vec3): number {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}

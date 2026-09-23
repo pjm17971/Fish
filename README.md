@@ -47,7 +47,20 @@ The same applies to the rest of it:
   turns. It is not a texture, because in a real fish it is not a pigment.
 - The **caustics** on the gravel are computed by refracting light through the
   actual simulated surface, so when you tilt the phone and the water sloshes, the
-  light on the floor sloshes with it.
+  light on the floor sloshes with it. In the desktop preview the surface is
+  solved as the tank's own standing waves, each ringing at the speed real water
+  gives a wave of its length. At rest it is nearly still, as a real tank is
+  away from the filter, and the light on the sand barely moves. When something
+  touches the water — the fish coming up for air, a bubble — a fine ripple
+  layer on the graphics card carries the centimetre rings it sends out, and
+  they throw rings of light across the sand.
+- Fine specks drift in the desktop preview's water, carried by the current and
+  settling slowly. They are nearly invisible until the lamp catches them.
+- In the desktop preview, the fish, its fins, the plants, the driftwood and the
+  stones **cast shadows**
+  that are sharp where they touch the sand and soften with height, which is
+  how the eye judges how far above the floor something is. The fins' shadows
+  are tinted red, because the fins are see-through and red.
 
 `docs/RESEARCH.md` sets out what was surveyed and what was chosen for each part,
 with sources. `docs/SIMULATION-SPEC.md` is the numerical model. `docs/ARCHITECTURE.md`
@@ -93,7 +106,7 @@ To run the tests:
 
 ```sh
 cd preview
-npm test           # 48 tests
+npm test           # 55 tests
 ```
 
 ---
