@@ -26,7 +26,6 @@ import {
   v3,
   set,
   copy,
-  add,
   sub,
   scale,
   addScaled,
@@ -716,8 +715,10 @@ export class FishBrain {
       case 'surface': {
         // Approach, break the surface, gulp, leave. The gulp is what the whole
         // drive exists for and it is worth doing properly: the snout genuinely
-        // crosses the water line, which makes real ripples.
-        const surfaceY = water.heightAt(loco.position.x, loco.position.z);
+        // crosses the water line, which makes real ripples. The water line is
+        // taken where the snout is: with the surface rippled, the height above
+        // the middle of the body can be a couple of millimetres off.
+        const surfaceY = water.heightAt(this.mouth.x, this.mouth.z);
         this.surfaceTimer += dt;
         switch (this.surfacePhase) {
           case 'approach': {
@@ -804,10 +805,19 @@ export class FishBrain {
       case 'strike': {
         const food = p.nearestFood;
         if (!food) break;
-        // Steer so the *mouth* arrives at the pellet, not the centre of mass.
+        // Head straight for the pellet. The mouth is on the fish's centreline,
+        // two and a half centimetres ahead of the centre of mass, so pointing
+        // the body at the pellet is what brings the mouth onto it.
+        //
+        // An earlier version aimed the centre of mass at the pellet shifted
+        // back by the mouth's offset, so that the mouth would land on it. That
+        // is how you would move a point, but a fish cannot slide sideways; it
+        // turns. Close in, with the pellet a few millimetres to one side of the
+        // snout, the shifted point sat beside the fish's middle, and a ten-
+        // degree correction read as a ninety-degree turn. The fish pivoted on
+        // the spot in seven of every ten frames within two centimetres of its
+        // food, instead of closing on it, and often circled away.
         copy(g.target, food.position);
-        add(g.target, g.target, loco.position);
-        sub(g.target, g.target, this.mouth);
         const d = p.foodDistance;
 
         // Slow down as it closes, rather than switching between two speeds.

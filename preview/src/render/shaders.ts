@@ -42,12 +42,6 @@ uniform vec3 uLightColour;
 uniform vec3 uAmbient;
 uniform float uExposure;
 
-// The caustic map is an accumulation of ray splats, and its absolute level
-// depends on how many rays were splatted. This scales it so that a perfectly
-// flat surface reads exactly 1.0; measured once at start-up from that flat
-// surface, so focusing brightens and defocusing darkens relative to a level
-// that means something.
-uniform float uCausticNorm;
 // The box the water occupies: (minX, floorY, minZ) to (maxX, waterY, maxZ).
 uniform vec3 uWaterMin;
 uniform vec3 uWaterMax;
@@ -59,9 +53,10 @@ uniform float uRefractIOR;
 uniform float uClipSide;
 
 // The light a flat surface gets, multiplied by this: 1.0 where the surface is
-// flat, brighter where rays converge, darker where they spread.
+// flat, brighter where rays converge, darker where they spread. The caustic map
+// is in exactly those units (see CAUSTICS_FRAG), so no calibration is needed.
 float causticLight(float raw, float strength) {
-  return mix(1.0, raw * uCausticNorm, strength);
+  return mix(1.0, raw, strength);
 }
 
 // The room above the tank, for the surface to reflect. There is no room
@@ -181,40 +176,145 @@ vec3 tonemap(vec3 x) {
 `;
 
 /**
- * Where a point *appears* to be from an eye outside the water.
+ * Refraction at the tank's panes: where a point under water *appears* to be.
  *
- * Light from a point inside the tank bends at the pane on its way out, and to
- * the eye the point sits closer than it is: a tank 25 cm deep looks about 19.
- * Every fish tank does this and it is one of the strongest cues that there is
- * water behind the glass rather than air, because the sand, the plants and the
- * fish all shift against the frame as the viewer moves.
+ * Light from a point inside the tank bends where it leaves the water, so the
+ * eye sees the point along a different line from the straight one. That is why
+ * a tank 25 cm deep looks about 19 cm deep from the front, why the fish looks
+ * bigger and nearer than it is, why the back wall swings towards you and the
+ * tank seems to flatten as you walk round it, and why a stem crossing the
+ * waterline looks broken. It is one of the strongest cues that there is water
+ * behind the glass rather than air.
  *
- * This is the paraxial result — the part of the path inside the water appears
- * shortened by the index of refraction, along the line of sight — applied per
- * vertex. Exact for near-normal viewing, and within a degree or two over the
- * angles a person looks into a tank at.
+ * For each vertex this finds the real path: the point S on the pane where a ray
+ * from the eye, bent by Snell's law, reaches the vertex. The vertex is then
+ * drawn on the straight line from the eye through S, which is where the eye
+ * sees it. Along that line it is placed |P - S| / n beyond the pane, which is
+ * the textbook apparent depth when looking straight in, and which lets the
+ * volume pass recover the true length of the underwater path by multiplying
+ * back by n.
  *
- * It applies to whatever part of the line of sight is in the water, not only
- * to points inside it: the wall of the room seen *through* the tank is pulled
- * forward by the tank's depth of water, and the same wall seen over the top of
- * it is not, which is why a room seen through an aquarium breaks at the
- * waterline.
+ * **One pane per pass.** The eye can see into the water through up to three
+ * panes at once — the front, a side, the top — and near the edge between two
+ * of them the same object is seen through both, in two different places.
+ * That is real: it is why a fish at the corner of a tank shows up twice. So
+ * the scene is drawn once for each pane the eye can see (uPane), with every
+ * vertex bent through that one pane, and each fragment is kept only where its
+ * line of sight really does cross that pane (PANE_CLIP). Choosing a pane per
+ * vertex instead stretches any triangle whose corners choose different panes
+ * across the whole gap between the two images, which was tried first and
+ * smeared the fish into a streak when seen from above. The test is made per
+ * fragment, from its true position, because made per vertex and blended
+ * across each triangle it left gaps and saw-teeth along the tank's edges.
+ * What is not in the water at all is drawn once more, where it is, in a pass
+ * of its own (uPane zero), and that split at the waterline is a real one too.
+ *
+ * The panes are treated as flat: the glass is, and the top is flat until it
+ * ripples, which the surface shader adds on top. The glass itself is a
+ * parallel sheet a few millimetres thick and barely shifts anything, so it is
+ * left out.
+ *
+ * An earlier version shortened the path *along* the straight line of sight,
+ * which moves a point towards the eye without moving it on screen at all.
+ *
+ * render/refraction.ts is the same calculation in TypeScript, which is what the
+ * tests check. Change one, change the other.
+ *
+ * Needs uCameraPos, uWaterMin, uWaterMax and uRefractIOR declared.
  */
-const APPARENT = /* glsl */ `
-vec3 apparentPosition(vec3 p) {
+const APPARENT_POSITION = /* glsl */ `
+// The pane this pass looks through, as its outward normal — one of the six
+// axis directions — or zero in the pass that draws what is out of the water.
+uniform vec3 uPane;
+// How far above the still waterline a point still counts as in the water:
+// 0 for the scene, a ripple's height for the surface mesh.
+uniform float uTopSlack;
+
+// Where p is drawn in this pass. inPane comes back positive where this pass
+// sees p and negative where it does not: where its line of sight crosses the
+// plane of the pane outside the pane's edges, or where p is out of the water
+// (in a pane's pass) or in it (in the pass for what is not).
+vec3 throughPane(vec3 p, out float inPane) {
+  inPane = 1.0;
   if (uRefractIOR <= 1.0) return p;
-  bool eyeInside = all(greaterThan(uCameraPos, uWaterMin)) && all(lessThan(uCameraPos, uWaterMax));
-  if (eyeInside) return p;
-  vec3 d = p - uCameraPos;
-  d += vec3(equal(d, vec3(0.0))) * 1e-7;
-  vec3 t0 = (uWaterMin - 1e-4 - uCameraPos) / d;
-  vec3 t1 = (uWaterMax + 1e-4 - uCameraPos) / d;
-  vec3 tn = min(t0, t1);
-  vec3 tf = max(t0, t1);
-  float tEnter = clamp(max(max(tn.x, tn.y), tn.z), 0.0, 1.0);
-  float tExit = clamp(min(min(tf.x, tf.y), tf.z), 0.0, 1.0);
-  float inWater = max(0.0, tExit - tEnter);
-  return p - d * inWater * (1.0 - 1.0 / uRefractIOR);
+  float n = uRefractIOR;
+  vec3 e = uCameraPos;
+
+  // How far p is outside the water; negative inside. The walls lie exactly on
+  // the sides of the box, so those get a millimetre of grace, and the ripples
+  // in the sand dip a few millimetres below the floor line, so that gets a
+  // centimetre. The top gets the surface's slack.
+  vec3 lo = uWaterMin - vec3(1e-3, 1e-2, 1e-3);
+  vec3 hi = vec3(uWaterMax.x + 1e-3, uWaterMax.y + uTopSlack, uWaterMax.z + 1e-3);
+  vec3 out3 = max(lo - p, p - hi);
+  float dry = max(max(out3.x, out3.y), out3.z);
+  if (dot(uPane, uPane) < 0.5) {
+    inPane = dry;
+    return p;
+  }
+
+  vec3 N = uPane;
+  vec3 onPane = mix(uWaterMin, uWaterMax, step(0.0, N.x + N.y + N.z));
+  float hE = dot(e - onPane, N);              // eye in front of the pane
+  float hP = dot(onPane - p, N);              // point behind it
+
+  vec3 s = p - N * dot(p - onPane, N);        // where the ray crosses the pane
+  vec3 apparent = p;
+  if (hE > 0.0 && hP > 1e-6) {
+    // Distance along the pane between the eye and the point, and the direction.
+    vec3 d = p - e;
+    vec3 lat = d - dot(d, N) * N;
+    float L = length(lat);
+    vec3 u = lat / max(L, 1e-9);
+
+    // Find how far along, x, the ray crosses the pane: Snell's law says
+    //   x / |ES| = n (L - x) / |SP|.
+    // The difference of the two sides rises steadily from x = 0 to x = L, so
+    // there is exactly one crossing. Newton's method, starting from the
+    // small-angle answer and falling back to halving the bracket whenever a
+    // step would leave it. Sixteen steps lands within a micron of the exact
+    // crossing from anywhere the camera can be, including an eye a fraction of
+    // a millimetre off the plane of a pane; eight were out by millimetres there.
+    float xlo = 0.0;
+    float xhi = L;
+    float x = L * hE / (hE + hP / n);
+    for (int i = 0; i < 16; i++) {
+      float a = sqrt(x * x + hE * hE);
+      float b = sqrt((L - x) * (L - x) + hP * hP);
+      float f = x / a - n * (L - x) / b;
+      if (f > 0.0) xhi = x; else xlo = x;
+      float slope = hE * hE / (a * a * a) + n * hP * hP / (b * b * b);
+      float next = x - f / slope;
+      x = (next >= xlo && next <= xhi) ? next : 0.5 * (xlo + xhi);
+    }
+    s = e + u * x - N * hE;
+    apparent = s + normalize(s - e) * (length(p - s) / n);
+  }
+
+  // How far inside the pane's edges the crossing is, ignoring the pane's own
+  // axis, and no further in than p is in the water.
+  vec3 edge = mix(min(s - lo, hi - s), vec3(1.0), abs(N));
+  inPane = min(min(edge.x, edge.y), min(edge.z, -dry));
+  return apparent;
+}
+
+vec3 apparentPosition(vec3 p) {
+  float inPane;
+  return throughPane(p, inPane);
+}
+`;
+
+/**
+ * For fragment shaders: whether this pass is the one that sees a point, from
+ * the point's true position. See APPARENT_POSITION.
+ */
+const PANE_CLIP = /* glsl */ `
+uniform vec3 uCameraPos;
+${APPARENT_POSITION}
+bool seenThroughThisPane(vec3 p) {
+  float inPane;
+  throughPane(p, inPane);
+  return inPane >= 0.0;
 }
 `;
 
@@ -262,6 +362,174 @@ vec3 thinFilm(float cosTheta, float thicknessNm) {
 }
 `;
 
+/**
+ * Reading the simulated surface smoothly.
+ *
+ * The water is simulated on a grid 4.4 mm apart, and the texture holds the
+ * height and the two slopes at each node. Interpolating slopes linearly
+ * between nodes makes their rate of change — the surface's curvature — jump at
+ * every grid line, and the caustics are made of exactly that curvature: the
+ * light on the sand came out in 4 mm tiles. Catmull-Rom interpolation keeps
+ * the slope and its rate of change continuous, so the pattern is as smooth as
+ * the water.
+ */
+const SURFACE_SAMPLE = /* glsl */ `
+vec4 catmullRomWeights(float t) {
+  float t2 = t * t, t3 = t2 * t;
+  return vec4(
+    -0.5 * t3 + t2 - 0.5 * t,
+     1.5 * t3 - 2.5 * t2 + 1.0,
+    -1.5 * t3 + 2.0 * t2 + 0.5 * t,
+     0.5 * t3 - 0.5 * t2
+  );
+}
+
+// (height, dh/dx, dh/dz) at a point given in grid units (node i at i).
+vec3 surfaceAt(sampler2D map, vec2 cell) {
+  ivec2 size = textureSize(map, 0);
+  vec2 base = floor(cell);
+  vec2 f = cell - base;
+  vec4 wx = catmullRomWeights(f.x);
+  vec4 wz = catmullRomWeights(f.y);
+  vec3 sum = vec3(0.0);
+  for (int j = 0; j < 4; j++) {
+    vec3 row = vec3(0.0);
+    for (int i = 0; i < 4; i++) {
+      ivec2 p = clamp(ivec2(base) + ivec2(i - 1, j - 1), ivec2(0), size - 1);
+      row += texelFetch(map, p, 0).rgb * wx[i];
+    }
+    sum += row * wz[j];
+  }
+  return sum;
+}
+`;
+
+/**
+ * Shadows.
+ *
+ * The tank light, after it has bent at the water surface, is rendered as a
+ * depth map looking straight down along the light (the shadow map). A point is
+ * in shadow when something sits between it and the light in that map.
+ *
+ * The edge of a shadow is sharp next to the thing casting it and softens with
+ * distance, because the lamp is not a point: seen from the sand it covers a
+ * small angle, and part of it is still visible just inside the shadow's edge.
+ * That is what tells the eye how far above the sand a fish is, and it is the
+ * main reason a fish with a hard-edged shadow still looks pasted on. So the
+ * shadow is sampled in two steps: first find how far above the point the
+ * blockers are, then blur the shadow by the width that distance and the lamp's
+ * size give.
+ *
+ * Fins are thin and see-through, so they get a map of their own that holds the
+ * light that gets *through* them — tinted by the pigment — rather than a yes or
+ * no. A betta's fins cast red-tinged shade, not black.
+ *
+ * Underwater there is also a lot of light arriving from every direction above
+ * — light scattered by the water and bounced off the glass. That fills
+ * shadows in, but it is itself blocked by anything overhanging. The same map,
+ * sampled very widely, stands in for how much of the sky above a point is
+ * covered, which is what darkens the sand under a resting fish and at the foot
+ * of a plant.
+ */
+const SHADOW = /* glsl */ `
+uniform sampler2D uShadowMap;       // depth of the opaque things, seen from the light
+uniform highp sampler2DShadow uShadowCompare;  // the same depth, read through a comparing, filtering sampler
+uniform sampler2D uFinShadow;       // rgb: light through the fins; a: 1 - depth of the topmost fin
+uniform mat4 uLightViewProjection;
+uniform vec3 uLightDirWater;        // towards the light, after refraction at the surface
+uniform vec2 uShadowExtent;         // metres covered by the map in x and y
+uniform float uShadowDepthRange;    // metres covered by depth 0 to 1
+uniform float uLightAngle;          // the lamp's angular radius, as seen from the water
+
+const vec2 POISSON[16] = vec2[16](
+  vec2(-0.94201624, -0.39906216), vec2(0.94558609, -0.76890725),
+  vec2(-0.09418410, -0.92938870), vec2(0.34495938, 0.29387760),
+  vec2(-0.91588581, 0.45771432), vec2(-0.81544232, -0.87912464),
+  vec2(-0.38277543, 0.27676845), vec2(0.97484398, 0.75648379),
+  vec2(0.44323325, -0.97511554), vec2(0.53742981, -0.47373420),
+  vec2(-0.26496911, -0.41893023), vec2(0.79197514, 0.19090188),
+  vec2(-0.24188840, 0.99706507), vec2(-0.81409955, 0.91437590),
+  vec2(0.19984126, 0.78641367), vec2(0.14383161, -0.14100790)
+);
+
+vec3 lightSpace(vec3 p) {
+  vec4 c = uLightViewProjection * vec4(p, 1.0);
+  return c.xyz / c.w * 0.5 + 0.5;
+}
+
+// A rotation per pixel, so the handful of taps do not line up into visible
+// copies of the shadow.
+mat2 tapRotation() {
+  float a = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+  float c = cos(a), s = sin(a);
+  return mat2(c, s, -s, c);
+}
+
+// How much of the tank light reaches this point, as a colour: 1 in full light,
+// 0 in full shadow, and tinted where it came through a fin.
+vec3 lightVisibility(vec3 worldPos, vec3 N) {
+  // Push the lookup a little off the surface, towards the light, so a surface
+  // does not shadow itself.
+  vec3 n = dot(N, uLightDirWater) < 0.0 ? -N : N;
+  vec3 ls = lightSpace(worldPos + n * 0.0006);
+  if (any(lessThan(ls.xy, vec2(0.0))) || any(greaterThan(ls.xy, vec2(1.0)))) return vec3(1.0);
+  float bias = 0.0008 / uShadowDepthRange;
+  float receiver = ls.z - bias;
+  mat2 rot = tapRotation();
+  vec2 metresToUV = 1.0 / uShadowExtent;
+
+  // 1. Blockers: how far above this point is whatever is in the way?
+  float searchRadius = 0.008;
+  float blockerSum = 0.0;
+  float blockers = 0.0;
+  for (int i = 0; i < 16; i += 2) {
+    vec2 uv = ls.xy + rot * POISSON[i] * searchRadius * metresToUV;
+    float d = texture(uShadowMap, uv).r;
+    if (d < receiver) { blockerSum += d; blockers += 1.0; }
+  }
+  // The same for the fins, which live in their own map.
+  vec4 finCentre = texture(uFinShadow, ls.xy);
+  float finDepth = 1.0 - finCentre.a;
+  float gap = 0.0;
+  if (blockers > 0.0) gap = (receiver - blockerSum / blockers) * uShadowDepthRange;
+  else if (finDepth < receiver) gap = (receiver - finDepth) * uShadowDepthRange;
+  else return vec3(1.0);
+
+  // 2. The penumbra that gap gives, with a floor for the scattering in the
+  // water, which softens even a contact shadow slightly.
+  float penumbra = clamp(2.0 * gap * uLightAngle + 0.0007, 0.0007, 0.012);
+  float lit = 0.0;
+  vec3 through = vec3(0.0);
+  for (int i = 0; i < 16; i++) {
+    vec2 uv = ls.xy + rot * POISSON[i] * penumbra * metresToUV;
+    lit += texture(uShadowCompare, vec3(uv, receiver));
+    vec4 fin = texture(uFinShadow, uv);
+    through += (1.0 - fin.a) < receiver ? fin.rgb : vec3(1.0);
+  }
+  return (lit / 16.0) * (through / 16.0);
+}
+
+// How much of the bright water above a point is open rather than covered by
+// something overhanging. Ambient light underwater mostly comes from above.
+float skyVisibility(vec3 worldPos, vec3 N) {
+  vec3 ls = lightSpace(worldPos + N * 0.001);
+  if (any(lessThan(ls.xy, vec2(0.0))) || any(greaterThan(ls.xy, vec2(1.0)))) return 1.0;
+  mat2 rot = tapRotation();
+  vec2 metresToUV = 1.0 / uShadowExtent;
+  float open = 0.0;
+  for (int i = 1; i < 16; i += 2) {
+    // Two rings, near and far, so both a close overhang and a broad one count.
+    float r = (i < 8 ? 0.010 : 0.022);
+    vec2 uv = ls.xy + rot * POISSON[i] * r * metresToUV;
+    float d = texture(uShadowMap, uv).r;
+    // Something a long way above blocks less of the sky than something close.
+    float height = (ls.z - d) * uShadowDepthRange;
+    open += height > 0.002 ? smoothstep(0.004, 0.09, height) : 1.0;
+  }
+  return open / 8.0;
+}
+`;
+
 // ---------------------------------------------------------------------------
 // Scene: body, fins, tank, plants
 // ---------------------------------------------------------------------------
@@ -269,10 +537,13 @@ vec3 thinFilm(float cosTheta, float thicknessNm) {
 export const SCENE_VERT = /* glsl */ `#version 300 es
 ${COMMON}
 
-in vec3 aPosition;
-in vec3 aNormal;
-in vec2 aUV;
-in vec2 aExtra;
+// Fixed locations, because the same vertex buffers are drawn by more than one
+// program — the shaded pass and the shadow pass — and a vertex array only
+// remembers locations, not names.
+layout(location = 0) in vec3 aPosition;
+layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aUV;
+layout(location = 3) in vec2 aExtra;
 
 uniform mat4 uViewProjection;
 uniform vec3 uCameraPos;
@@ -287,7 +558,7 @@ out vec3 vView;
 uniform float uSway;
 uniform float uTime;
 
-${APPARENT}
+${APPARENT_POSITION}
 
 // Plants moving in the filter's current.
 //
@@ -340,12 +611,14 @@ void main() {
 export const FISH_FRAG = /* glsl */ `#version 300 es
 ${COMMON}
 ${THIN_FILM}
+${SHADOW}
 
 in vec3 vWorldPos;
 in vec3 vNormal;
 in vec2 vUV;
 in vec2 vExtra;
 in vec3 vView;
+${PANE_CLIP}
 
 uniform sampler2D uCaustics;
 uniform float uWaterY;
@@ -386,6 +659,9 @@ void surfaceFrame(vec3 N, vec2 uv, out vec3 T, out vec3 B) {
 
 void main() {
   if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
+  // Only where this pass's pane is the one the eye sees it through; see
+  // APPARENT_POSITION.
+  if (!seenThroughThisPane(vWorldPos)) discard;
   vec3 N0 = normalize(vNormal);
   vec3 N = N0;
   vec3 V = normalize(vView);
@@ -523,8 +799,13 @@ void main() {
   float causticMod = causticLight(texture(uCaustics, cuv).r,
                                   0.85 * smoothstep(-0.1, 0.4, N0.y) * exp(-depthBelow * 1.5));
 
-  vec3 lit = uLightColour * causticMod * NdotL;
-  vec3 colour = albedo * (lit + uAmbient);
+  // What the lamp can reach: the fins over the back and the leaves overhead
+  // both shade the body.
+  vec3 shadow = lightVisibility(vWorldPos, normalize(vNormal));
+  vec3 ambient = uAmbient * mix(1.0, skyVisibility(vWorldPos, normalize(vNormal)), 0.5);
+
+  vec3 lit = uLightColour * causticMod * NdotL * shadow;
+  vec3 colour = albedo * (lit + ambient);
   colour += specular * lit;
   // Iridescence is a reflection off the guanine platelets, so it lives near
   // the specular direction and at grazing angles, not spread evenly over the
@@ -532,7 +813,7 @@ void main() {
   // pinkish white and the pigment never shows through.
   float irisView = 0.02 + 0.45 * pow(1.0 - NdotV, 3.0);
   float irisGlint = D * 0.2;
-  colour += iridescence * irisMask * (irisView + irisGlint) * (lit * 0.6 + uAmbient * 0.4);
+  colour += iridescence * irisMask * (irisView + irisGlint) * (lit * 0.6 + ambient * 0.4);
 
   // --- Subsurface ---
   //
@@ -542,7 +823,7 @@ void main() {
   float back = pow(max(0.0, dot(V, -L)), 4.0);
   vec3 sss = vec3(0.85, 0.2, 0.16) * (wrap * 0.30 + back * 0.55);
   float thin = 1.0 - smoothstep(0.0, 0.55, NdotV); // grazing angles are thin
-  colour += sss * uLightColour * thin * 0.3;
+  colour += sss * uLightColour * shadow * thin * 0.3;
 
   // --- The eye, over everything else ---
   if (eyeMask > 0.0) {
@@ -553,13 +834,13 @@ void main() {
     float pupil = 1.0 - smoothstep(0.58, 0.66, eyeD);
     vec3 iris = mix(vec3(0.07, 0.035, 0.01), vec3(0.02, 0.01, 0.008), smoothstep(0.8, 1.0, eyeD));
     vec3 eyeAlbedo = mix(iris, vec3(0.0), pupil);
-    vec3 eyeCol = eyeAlbedo * (uLightColour * eNdotL * 0.6 + uAmbient);
+    vec3 eyeCol = eyeAlbedo * (uLightColour * shadow * eNdotL * 0.6 + ambient);
     // The cornea is a clean wet lens: a sharp highlight and a reflection of
     // the room, both far brighter than the skin's.
     vec3 eH = normalize(V + L);
     float eD = distributionGGX(max(dot(eyeN, eH), 0.0), 0.06);
     float eF = fresnelSchlick(eNdotV, 0.03);
-    eyeCol += uLightColour * eD * 0.02 * eNdotL;
+    eyeCol += uLightColour * shadow * eD * 0.02 * eNdotL;
     eyeCol += envColour(vWorldPos, reflect(-V, eyeN)) * eF * 0.3;
     colour = mix(colour, eyeCol, eyeMask);
   }
@@ -569,6 +850,53 @@ void main() {
   colour *= uWaterTint;
 
   fragColour = vec4(tonemap(colour * uExposure), 1.0);
+}
+`;
+
+/**
+ * The outline each fin is cut to from its simulated sheet, shared by the fin
+ * shader and the fins' shadow pass so a fin's shadow has the fin's shape.
+ * Needs COMMON, for PI and noise2.
+ */
+const FIN_OUTLINE = /* glsl */ `
+// 0 caudal, 1 dorsal, 2 anal, 3 pelvic.
+uniform float uFinShape;
+
+// How far out along its rays the fin reaches, as a fraction of the simulated
+// sheet, at a point \`u\` of the way across it.
+float finReach(float u) {
+  if (uFinShape < 0.5) {
+    // Caudal (u = 0 is the lower edge): a broad rounded veil, fullest a little
+    // below the middle where a long tail hangs.
+    float rounded = pow(sin(PI * clamp(u, 0.0, 1.0)), 0.55);
+    return 0.62 + 0.36 * rounded + 0.05 * (1.0 - u);
+  } else if (uFinShape < 1.5) {
+    // Dorsal (u = 0 at the front): low where it starts and rising to a tall
+    // rounded rear lobe.
+    return 0.3 + 0.7 * sin(0.5 * PI * smoothstep(0.0, 0.8, u)) - 0.1 * smoothstep(0.88, 1.0, u);
+  } else if (uFinShape < 2.5) {
+    // Anal: shallow at the front, deepening steadily towards the tail.
+    return mix(0.38, 0.98, smoothstep(0.0, 0.95, u));
+  }
+  // Pelvic: a long streamer.
+  return 1.0;
+}
+
+// How far out towards the fin's edge a point of the sheet is: 0 at the body,
+// 1 on the edge, more than 1 outside the fin. \`f\` is the point's place
+// between two rays, -0.5 to 0.5.
+float finEdge(float across, float along, float f) {
+  float reach = finReach(across);
+  // Ray tips run slightly beyond the webbing, giving a finely scalloped edge,
+  // and the edge wanders a little so it is not ruled.
+  float tip = pow(1.0 - clamp(2.0 * abs(f), 0.0, 1.0), 3.0);
+  reach += 0.035 * tip + 0.05 * (noise2(vec2(across * 5.0, 1.7 * uFinShape)) - 0.5);
+  if (uFinShape > 2.5) {
+    // Pelvic streamers taper to a point.
+    float halfWidth = 0.5 * pow(max(0.0, 1.0 - along), 0.7);
+    if (abs(across - 0.5) > halfWidth) return 2.0;
+  }
+  return along / max(0.05, reach);
 }
 `;
 
@@ -592,48 +920,33 @@ void main() {
 export const FIN_FRAG = /* glsl */ `#version 300 es
 ${COMMON}
 ${THIN_FILM}
+${SHADOW}
 
 in vec3 vWorldPos;
 in vec3 vNormal;
 in vec2 vUV;
 in vec2 vExtra;
 in vec3 vView;
+${PANE_CLIP}
 
 uniform sampler2D uCaustics;
 uniform float uWaterY;
 uniform vec3 uFinColour;
 uniform vec2 uCausticsExtent;
 uniform float uTime;
-// 0 caudal, 1 dorsal, 2 anal, 3 pelvic.
-uniform float uFinShape;
+${FIN_OUTLINE}
 // How many bony rays to draw across the fin. Unrelated to how many the
 // physics simulates: those are the sheet's grid, these are anatomy.
 uniform float uRayCount;
 
 out vec4 fragColour;
 
-// How far out along its rays the fin reaches, as a fraction of the simulated
-// sheet, at a point \`u\` of the way across it.
-float finReach(float u) {
-  if (uFinShape < 0.5) {
-    // Caudal (u = 0 is the lower edge): a broad rounded veil, fullest a little
-    // below the middle where a long tail hangs.
-    float rounded = pow(sin(PI * clamp(u, 0.0, 1.0)), 0.55);
-    return 0.62 + 0.36 * rounded + 0.05 * (1.0 - u);
-  } else if (uFinShape < 1.5) {
-    // Dorsal (u = 0 at the front): low where it starts and rising to a tall
-    // rounded rear lobe.
-    return 0.3 + 0.7 * sin(0.5 * PI * smoothstep(0.0, 0.8, u)) - 0.1 * smoothstep(0.88, 1.0, u);
-  } else if (uFinShape < 2.5) {
-    // Anal: shallow at the front, deepening steadily towards the tail.
-    return mix(0.38, 0.98, smoothstep(0.0, 0.95, u));
-  }
-  // Pelvic: a long streamer.
-  return 1.0;
-}
 
 void main() {
   if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
+  // Only where this pass's pane is the one the eye sees it through; see
+  // APPARENT_POSITION.
+  if (!seenThroughThisPane(vWorldPos)) discard;
 
   float across = vUV.x;     // 0 to 1 across the rays
   float along = vExtra.x;   // 0 at the body, 1 at the end of the simulated rays
@@ -656,17 +969,7 @@ void main() {
   ray *= 1.0 - smoothstep(0.25, 0.6, fwidth(q));
 
   // --- Outline ---
-  float reach = finReach(across);
-  // Ray tips run slightly beyond the webbing, giving a finely scalloped edge,
-  // and the edge wanders a little so it is not ruled.
-  float tip = pow(1.0 - clamp(2.0 * abs(f), 0.0, 1.0), 3.0);
-  reach += 0.035 * tip + 0.05 * (noise2(vec2(across * 5.0, 1.7 * uFinShape)) - 0.5);
-  if (uFinShape > 2.5) {
-    // Pelvic streamers taper to a point.
-    float halfWidth = 0.5 * pow(max(0.0, 1.0 - along), 0.7);
-    if (abs(across - 0.5) > halfWidth) discard;
-  }
-  float edge = along / max(0.05, reach);
+  float edge = finEdge(across, along, f);
   if (edge > 1.0) discard;
   float feather = 1.0 - smoothstep(0.86, 1.0, edge);
 
@@ -705,7 +1008,8 @@ void main() {
     (vWorldPos.z + uCausticsExtent.y) / uCausticsExtent.y
   );
   float depthBelow = max(0.0, uWaterY - vWorldPos.y);
-  vec3 lit = uLightColour * causticLight(texture(uCaustics, cuv).r, 0.75 * exp(-depthBelow * 1.5));
+  vec3 lit = uLightColour * causticLight(texture(uCaustics, cuv).r, 0.75 * exp(-depthBelow * 1.5))
+    * lightVisibility(vWorldPos, N);
   vec3 colour = tint * (NdotL * lit * 0.5 + uAmbient);
   colour += tint * through * (backlight * 2.6 + 0.3) * lit;
   colour += iridescence * sheen * (lit * 0.4 + uAmbient);
@@ -727,71 +1031,33 @@ void main() {
 }
 `;
 
-/** Shadow spheres the tank shader takes: the hardscape's and the fish's. */
-export const MAX_OCCLUDERS = 64;
-/** Of those, how many are the fish's, at the end. */
-export const FISH_OCCLUDERS = 3;
-
 /**
  * Sand, the substrate seen through the glass, leaves, driftwood and stone.
  * `aExtra.x` selects which (see SURFACE in scenery.ts).
  */
 export const TANK_FRAG = /* glsl */ `#version 300 es
 ${COMMON}
+${SHADOW}
 
 in vec3 vWorldPos;
 in vec3 vNormal;
 in vec2 vUV;
 in vec2 vExtra;
 in vec3 vView;
+${PANE_CLIP}
 
 uniform sampler2D uCaustics;
 uniform float uWaterY;
 uniform vec2 uCausticsExtent;
 uniform float uTime;
 
-// Spheres standing in for the stones, the wood and the fish: (centre, radius).
-uniform vec4 uOccluders[${MAX_OCCLUDERS}];
-uniform int uOccluderCount;
-
 out vec4 fragColour;
-
-// Soft shadow from the lamp. The lamp is a strip the width of the tank a few
-// centimetres above the water, so as seen from the sand it is large, and the
-// shadows it casts are soft and widen with distance from what casts them —
-// hence a penumbra that grows along the ray.
-float occluderShadow(vec3 p, vec3 L) {
-  float s = 1.0;
-  for (int i = 0; i < ${MAX_OCCLUDERS}; i++) {
-    if (i >= uOccluderCount) break;
-    vec4 o = uOccluders[i];
-    vec3 v = o.xyz - p;
-    float t = dot(v, L);
-    if (t <= 0.0) continue;
-    float d = length(v - L * t);
-    float pen = o.w * 0.3 + t * 0.18;
-    s *= mix(0.25, 1.0, smoothstep(o.w - pen, o.w + pen, d));
-  }
-  return s;
-}
-
-// Ambient occlusion: the darkening where things sit on the sand, from the
-// fraction of the sky each sphere hides (its solid angle, cosine-weighted).
-float occluderAO(vec3 p, vec3 N) {
-  float ao = 1.0;
-  for (int i = 0; i < ${MAX_OCCLUDERS}; i++) {
-    if (i >= uOccluderCount) break;
-    vec4 o = uOccluders[i];
-    vec3 v = o.xyz - p;
-    float d2 = max(dot(v, v), 1e-8);
-    float c = max(dot(N, v * inversesqrt(d2)), 0.0);
-    ao *= 1.0 - clamp(o.w * o.w / d2 * c, 0.0, 1.0) * 0.85;
-  }
-  return ao;
-}
 
 void main() {
   if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
+  // Only where this pass's pane is the one the eye sees it through; see
+  // APPARENT_POSITION.
+  if (!seenThroughThisPane(vWorldPos)) discard;
   vec3 N = normalize(vNormal);
   vec3 V = normalize(vView);
   vec3 L = normalize(uLightDir);
@@ -802,20 +1068,22 @@ void main() {
 
   vec3 albedo;
   float roughness;
-  float ao = 1.0;
   vec3 translucent = vec3(0.0);
 
   if (kind < 0.5) {
     // Sand. Individual grains, at two scales so it does not read as one texture
     // frequency, and slightly warm.
+    //
+    // A shade darker than it was: with the caustics now at full strength the
+    // bright lines carry two to three times the average light, and on sand
+    // this pale they tone-mapped to a broad white wash instead of lines.
     float grain = noise2(vUV * 420.0) * 0.5 + noise2(vUV * 1400.0) * 0.5;
-    albedo = mix(vec3(0.20, 0.17, 0.14), vec3(0.42, 0.37, 0.30), grain);
+    albedo = mix(vec3(0.15, 0.13, 0.105), vec3(0.32, 0.28, 0.225), grain);
     // A scattering of darker grains, which is what makes real sand read as
     // granular rather than as noise.
     float dark = step(0.86, noise2(vUV * 900.0 + 13.0));
     albedo *= 1.0 - dark * 0.45;
     roughness = 0.9;
-    ao = occluderAO(vWorldPos, N);
   } else if (kind < 1.5) {
     // The substrate's cut face, pressed against the glass: dark soil at the
     // bottom and the sand capping it, with a ragged boundary between them.
@@ -907,10 +1175,6 @@ void main() {
   }
 
   float NdotL = max(dot(N, L), 0.0);
-  // Only the sand and the leaves take shadows from the spheres; the stones
-  // and the wood are what the spheres stand in for, and would shadow
-  // themselves wrongly.
-  float shadow = (kind < 0.5 || leaf) ? occluderShadow(vWorldPos, L) : 1.0;
 
   vec2 cuv = vec2(
     (vWorldPos.x + uCausticsExtent.x) / (2.0 * uCausticsExtent.x),
@@ -918,10 +1182,17 @@ void main() {
   );
   float depthBelow = max(0.0, uWaterY - vWorldPos.y);
   float underWater = step(vWorldPos.y, uWaterY);
-  vec3 light = uLightColour * shadow * mix(1.0, ao, 0.5)
+  // The caustic map is computed for the sand itself, so on the sand it is the
+  // light, not an effect laid over it; elsewhere it is an approximation that
+  // fades with height above the floor.
+  float onFloor = kind < 0.5 ? 1.0 : exp(-depthBelow * 1.2) * 0.9;
+  vec3 shadow = underWater > 0.5 ? lightVisibility(vWorldPos, N) : vec3(1.0);
+  float sky = underWater > 0.5 ? skyVisibility(vWorldPos, N) : 1.0;
+  vec3 light = uLightColour * shadow
     * causticLight(texture(uCaustics, cuv).r,
-                   0.9 * underWater * exp(-depthBelow * 1.2) * smoothstep(-0.2, 0.5, N.y));
-  vec3 colour = albedo * (light * NdotL + uAmbient * ao);
+                   onFloor * underWater * smoothstep(-0.2, 0.5, N.y));
+  vec3 ambient = uAmbient * mix(1.0, sky, 0.75);
+  vec3 colour = albedo * (light * NdotL + ambient);
 
   if (leaf) {
     // Diffuse transmission: light on the far face of the leaf.
@@ -955,6 +1226,7 @@ in vec3 vNormal;
 in vec2 vUV;
 in vec2 vExtra;
 in vec3 vView;
+${PANE_CLIP}
 
 uniform float uWaterY;
 
@@ -962,6 +1234,8 @@ out vec4 fragColour;
 
 void main() {
   if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
+  // Once, in the pass that sees it; see APPARENT_POSITION.
+  if (!seenThroughThisPane(vWorldPos)) discard;
   vec3 N = normalize(vNormal);
   vec3 V = normalize(vView);
   if (dot(N, V) < 0.0) N = -N;
@@ -1105,6 +1379,61 @@ void main() {
 }
 `;
 
+/**
+ * The shadow pass for solid things: only depth is wanted, so there is nothing
+ * to shade.
+ */
+export const SHADOW_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+void main() {}
+`;
+
+/**
+ * The shadow pass for fins: how much light gets through, and what colour it is
+ * when it does.
+ *
+ * Blended multiplicatively into the colour, so two fins over the same spot let
+ * through the product of what each lets through, and the alpha keeps the depth
+ * of the fin nearest the light, so nothing above the fins is shaded by them.
+ * The opacity follows the same membrane-and-rays model the fin shader draws
+ * with, looking along the light instead of along the eye.
+ */
+export const FIN_SHADOW_FRAG = /* glsl */ `#version 300 es
+${COMMON}
+in vec3 vWorldPos;
+in vec3 vNormal;
+in vec2 vUV;
+in vec2 vExtra;
+uniform vec3 uFinColour;
+uniform vec3 uLightDirWater;
+uniform float uRayCount;
+${FIN_OUTLINE}
+out vec4 fragColour;
+void main() {
+  float across = vUV.x;
+  float along = vExtra.x;
+  // The same rays and outline as the fin shader draws.
+  float q = across * uRayCount;
+  float f = fract(q) - 0.5;
+  float edge = finEdge(across, along, f);
+  if (edge > 1.0) discard;
+  float fork = 0.2 * smoothstep(0.3, 0.9, along);
+  float d = min(abs(f - fork), abs(f + fork));
+  // Wider than the drawn rays: the shadow map's texels are coarser than the
+  // screen's pixels, and a ray narrower than a texel would flicker in and out.
+  float ray = 1.0 - smoothstep(0.06, 0.20, d);
+  float cosL = max(0.15, abs(dot(normalize(vNormal), uLightDirWater)));
+  float through = exp(-2.2 * vExtra.y * (1.0 + ray * 1.5) / cosL);
+  float opacity = clamp(0.30 + 0.55 * (1.0 - through) + ray * 0.25, 0.0, 1.0);
+  opacity *= 1.0 - smoothstep(0.86, 1.0, edge);
+  // What the pigment lets through: mostly the red end, which is why the
+  // pigment looks red.
+  vec3 filterColour = uFinColour / max(max(uFinColour.r, uFinColour.g), uFinColour.b);
+  vec3 transmitted = mix(vec3(1.0), filterColour * 0.85, opacity);
+  fragColour = vec4(transmitted, 1.0 - gl_FragCoord.z);
+}
+`;
+
 // ---------------------------------------------------------------------------
 // Caustics
 // ---------------------------------------------------------------------------
@@ -1112,10 +1441,11 @@ void main() {
 /**
  * Caustics, computed rather than looped.
  *
- * A grid of light rays is refracted through the real water surface with Snell's
- * law and projected onto the substrate. Where neighbouring rays converge, the
- * light concentrates; the brightness at a point is the ratio of the original
- * cell's area to the deformed cell's area — the Jacobian of the refraction map.
+ * A fine mesh of light rays is refracted through the simulated water surface
+ * with Snell's law and laid down where each ray lands on the sand. Where the
+ * surface bunches the rays together the light is brighter, and the brightness
+ * is exactly the ratio of a patch's area where the light entered the water to
+ * its area where it lands — the Jacobian of the refraction map.
  *
  * The alternative is a looping caustic texture, which is what most real-time
  * water uses. It is cheaper and it is wrong in a way that shows the moment
@@ -1124,89 +1454,88 @@ void main() {
  * Here, a pellet hitting the surface sends a ring through the caustics because
  * it sent a ring through the water.
  *
- * Drawn as points with additive blending, which is the WebGL2 way of scattering
- * into a target.
+ * The rays form a mesh of triangles rather than a scatter of points. Each
+ * triangle is drawn where its corners land, and it knows where its corners
+ * started, so the area ratio is exact for every triangle and the pattern has
+ * no dot grid in it. Where the surface folds light over on itself, triangles
+ * overlap and add, which is what light does.
  */
 export const CAUSTICS_VERT = /* glsl */ `#version 300 es
 precision highp float;
+${SURFACE_SAMPLE}
 
-in vec2 aGrid;                 // 0..1 across the water surface
+in vec2 aGrid;                 // position across the water surface, 0..1 (a little beyond at the edges)
 
-uniform sampler2D uHeightMap;  // r = surface displacement
-uniform vec2 uGridSize;
+uniform sampler2D uHeightMap;  // rgb = simulated height, dh/dx, dh/dz at each grid node
+uniform sampler2D uRipples;    // the fine ripples from touches: height (mm), dh/dx, dh/dz
 uniform vec2 uTankExtent;      // half-width, depth
 uniform float uWaterY;
 uniform float uFloorY;
 uniform vec3 uLightDir;
 uniform float uIOR;
 
-out float vIntensity;
+out vec2 vSurface;
+out vec2 vFloor;
 
-// Where does a light ray hitting the surface at this grid point land?
-vec2 refractTo(vec2 g) {
-  float h = texture(uHeightMap, g).r;
-  vec2 texel = 1.0 / uGridSize;
-  float hL = texture(uHeightMap, g - vec2(texel.x, 0.0)).r;
-  float hR = texture(uHeightMap, g + vec2(texel.x, 0.0)).r;
-  float hD = texture(uHeightMap, g - vec2(0.0, texel.y)).r;
-  float hU = texture(uHeightMap, g + vec2(0.0, texel.y)).r;
-
+void main() {
   vec2 world = vec2(
-    (g.x - 0.5) * 2.0 * uTankExtent.x,
-    -uTankExtent.y + g.y * uTankExtent.y
+    (aGrid.x - 0.5) * 2.0 * uTankExtent.x,
+    -uTankExtent.y + aGrid.y * uTankExtent.y
   );
-  float dx = (2.0 * uTankExtent.x) * texel.x;
-  float dz = uTankExtent.y * texel.y;
-  vec3 n = normalize(vec3(-(hR - hL) / (2.0 * dx), 1.0, -(hU - hD) / (2.0 * dz)));
+
+  // The simulated surface here: its first and last nodes sit on the walls.
+  // Rays from beyond the walls (the mesh runs a little past them, to light
+  // the strip of floor the slanting light reaches through the glass) meet no
+  // surface, so they go straight on.
+  vec2 gridSize = vec2(textureSize(uHeightMap, 0));
+  bool onSurface = all(greaterThanEqual(aGrid, vec2(0.0))) && all(lessThanEqual(aGrid, vec2(1.0)));
+  vec3 s = vec3(0.0);
+  if (onSurface) {
+    s = surfaceAt(uHeightMap, aGrid * (gridSize - 1.0));
+    vec3 fine = texture(uRipples, aGrid).rgb;
+    s += vec3(fine.r * 1e-3, fine.g, fine.b);
+  }
+  float h = s.x;
+  vec3 n = normalize(vec3(-s.y, 1.0, -s.z));
 
   // Snell's law, vector form. Air to water, so the ray bends towards the normal.
   vec3 i = normalize(-uLightDir);
   float eta = 1.0 / uIOR;
   float cosi = -dot(n, i);
   float k = 1.0 - eta * eta * (1.0 - cosi * cosi);
-  vec3 refracted = (k < 0.0) ? reflect(i, n) : eta * i + (eta * cosi - sqrt(k)) * n;
+  vec3 refracted = eta * i + (eta * cosi - sqrt(max(k, 0.0))) * n;
 
-  // Project to the floor.
-  float surfaceY = uWaterY + h;
-  float t = (uFloorY - surfaceY) / min(-1e-4, refracted.y);
-  return world + refracted.xz * t;
-}
+  // On to the floor.
+  float t = (uFloorY - (uWaterY + h)) / min(-1e-4, refracted.y);
+  vec2 landing = world + refracted.xz * t;
 
-void main() {
-  vec2 texel = 1.0 / uGridSize;
-
-  vec2 p00 = refractTo(aGrid);
-  vec2 p10 = refractTo(aGrid + vec2(texel.x, 0.0));
-  vec2 p01 = refractTo(aGrid + vec2(0.0, texel.y));
-
-  // Area of the deformed cell against the area it started with. Where rays
-  // converge the ratio is large and the light piles up.
-  vec2 e1 = p10 - p00;
-  vec2 e2 = p01 - p00;
-  float deformedArea = abs(e1.x * e2.y - e1.y * e2.x);
-  float originalArea = (2.0 * uTankExtent.x * texel.x) * (uTankExtent.y * texel.y);
-  vIntensity = clamp(originalArea / max(1e-9, deformedArea), 0.0, 12.0);
-
-  // To clip space over the floor.
+  vSurface = world;
+  vFloor = landing;
   vec2 uv = vec2(
-    (p00.x + uTankExtent.x) / (2.0 * uTankExtent.x),
-    (p00.y + uTankExtent.y) / uTankExtent.y
+    (landing.x + uTankExtent.x) / (2.0 * uTankExtent.x),
+    (landing.y + uTankExtent.y) / uTankExtent.y
   );
   gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
-  gl_PointSize = 2.0;
 }
 `;
 
 export const CAUSTICS_FRAG = /* glsl */ `#version 300 es
 precision highp float;
-in float vIntensity;
+in vec2 vSurface;
+in vec2 vFloor;
 out vec4 fragColour;
 void main() {
-  // Soften the point into a small disc so the accumulation does not alias into
-  // a grid of dots.
-  vec2 d = gl_PointCoord - 0.5;
-  float falloff = exp(-8.0 * dot(d, d));
-  fragColour = vec4(vec3(vIntensity * falloff * 0.06), 1.0);
+  // Area this pixel of floor covers, against the area of surface its light
+  // came through. Both are linear across a triangle, so this is exact for it.
+  vec2 a = dFdx(vSurface), b = dFdy(vSurface);
+  vec2 c = dFdx(vFloor), d = dFdy(vFloor);
+  float before = abs(a.x * b.y - a.y * b.x);
+  float after = abs(c.x * d.y - c.y * d.x);
+  // A perfect focus is infinitely bright in the maths; the lamp's size and the
+  // blur after this keep it finite in reality. Cap it well above anything the
+  // blur leaves.
+  float intensity = min(before / max(after, 1e-14), 40.0);
+  fragColour = vec4(vec3(intensity), 1.0);
 }
 `;
 
@@ -1263,6 +1592,7 @@ in vec3 vNormal;
 in vec2 vUV;
 in vec2 vExtra;
 in vec3 vView;
+${PANE_CLIP}
 
 uniform sampler2D uScene;
 uniform sampler2D uCaustics;
@@ -1271,25 +1601,31 @@ uniform vec2 uViewport;
 uniform float uWaterY;
 uniform vec2 uCausticsExtent;
 uniform float uTime;
+uniform sampler2D uRipples;      // the fine ripples from touches: height (mm), dh/dx, dh/dz
 
 out vec4 fragColour;
 
 void main() {
+  // The simulated surface's own normal, tipped by the fine ripples. The same
+  // ripples draw the caustics on the sand, so the light on the floor belongs
+  // to the surface you are looking at.
+  vec2 ruv = vec2(
+    (vWorldPos.x + uCausticsExtent.x) / (2.0 * uCausticsExtent.x),
+    (vWorldPos.z + uCausticsExtent.y) / uCausticsExtent.y
+  );
+  vec3 fine = texture(uRipples, ruv).rgb;
   vec3 N = normalize(vNormal);
+  N = normalize(N + vec3(-fine.g, 0.0, -fine.b) * sign(N.y));
   vec3 V = normalize(vView);
   bool fromBelow = dot(N, V) < 0.0;
   if (fromBelow) N = -N;
 
-  // Small-scale ripples the height field does not resolve. Two layers drifting
-  // against each other, so it never reads as a single scrolling pattern.
-  vec2 rippleUV = vWorldPos.xz * 260.0;
-  float r1 = noise2(rippleUV + vec2(uTime * 0.6, uTime * 0.35));
-  float r2 = noise2(rippleUV * 1.7 - vec2(uTime * 0.42, uTime * 0.71));
-  vec3 rippleNormal = normalize(vec3((r1 - 0.5) * 0.10, 1.0, (r2 - 0.5) * 0.10));
-  N = normalize(N + rippleNormal * 0.35 - vec3(0.0, 0.35, 0.0));
-
   float NdotV = max(dot(N, V), 1e-4);
   vec3 L = normalize(uLightDir);
+
+  // Only where this pass's pane is the one the eye sees it through; see
+  // APPARENT_POSITION.
+  if (!seenThroughThisPane(vWorldPos)) discard;
 
   // Fresnel, with water's f0 of 0.02.
   float F = fresnelSchlick(NdotV, 0.02);
@@ -1308,10 +1644,15 @@ void main() {
   // is a mirror past the critical angle and shows the tank back to itself —
   // the single most striking thing about being under water, and almost never
   // rendered.
+  //
+  // The scene and reflection targets hold colours that are already tone
+  // mapped (each object maps its own), so only the room, which is computed
+  // here in linear light, is mapped here. Mapping the lot again washed the
+  // tank out to near-white whenever it was seen through the surface.
   vec3 R = reflect(-V, N);
   vec2 reflUV = clamp(screenUV + N.xz * 0.06, vec2(0.001), vec2(0.999));
   vec4 reflTex = texture(uReflection, reflUV);
-  vec3 reflected = mix(envColour(vWorldPos, R), reflTex.rgb, reflTex.a);
+  vec3 reflected = mix(tonemap(envColour(vWorldPos, R) * uExposure), reflTex.rgb, reflTex.a);
   float reflectance = F;
   if (fromBelow) {
     // Total internal reflection beyond the critical angle, 48.6 degrees for
@@ -1326,9 +1667,9 @@ void main() {
   // Specular glint off the surface, which is what makes the ripples read.
   vec3 H = normalize(V + L);
   float spec = distributionGGX(max(dot(N, H), 0.0), 0.06);
-  colour += uLightColour * spec * 0.35 * (1.0 - float(fromBelow) * 0.7);
+  colour += tonemap(uLightColour * spec * 0.35 * (1.0 - float(fromBelow) * 0.7) * uExposure);
 
-  fragColour = vec4(tonemap(colour * uExposure), 1.0);
+  fragColour = vec4(colour, 1.0);
 }
 `;
 
@@ -1355,7 +1696,6 @@ uniform vec3 uCameraPos;
 uniform mat4 uInverseViewProjection;
 uniform float uWaterY;
 uniform float uTime;
-uniform float uParticleDensity;
 
 out vec4 fragColour;
 
@@ -1413,19 +1753,6 @@ void main() {
 
   vec3 colour = scene * T + inScatter;
 
-  // Suspended particulate — the motes drifting in any real tank. Sparse, and
-  // only visible when the light catches them.
-  float motes = 0.0;
-  for (int i = 0; i < 3; i++) {
-    float fi = float(i);
-    vec2 p = vUV * (60.0 + fi * 37.0) + vec2(uTime * (0.01 + fi * 0.004), uTime * 0.006);
-    float n = noise2(p);
-    motes += smoothstep(0.975, 1.0, n) * (1.0 - fi * 0.3);
-  }
-  // Motes are in the water, so only where the line of sight passes through it.
-  colour += vec3(0.8, 0.85, 0.8) * motes * uParticleDensity * (0.3 + phase * 2.0)
-          * smoothstep(0.0, 0.02, underwater);
-
   fragColour = vec4(colour, 1.0);
 }
 `;
@@ -1482,8 +1809,8 @@ uniform vec3 uWaterMax;
 uniform float uRefractIOR;
 out vec2 vUV;
 out vec3 vWorldPos;
-// Same apparent-depth shift as the scene geometry.
-${APPARENT}
+// The same refraction as the scene geometry.
+${APPARENT_POSITION}
 void main() {
   vUV = aUV;
   vWorldPos = aPosition;
@@ -1495,12 +1822,14 @@ export const PELLET_FRAG = /* glsl */ `#version 300 es
 ${COMMON}
 in vec2 vUV;
 in vec3 vWorldPos;
+${PANE_CLIP}
 uniform float uWaterY;
 out vec4 fragColour;
 void main() {
   vec2 d = vUV * 2.0 - 1.0;
   float r2 = dot(d, d);
   if (r2 > 1.0) discard;
+  if (!seenThroughThisPane(vWorldPos)) discard;
   // Shade it as a sphere: the normal follows from the disc coordinate.
   vec3 N = normalize(vec3(d, sqrt(max(0.0, 1.0 - r2))));
   float NdotL = max(dot(N, normalize(uLightDir)), 0.0);
@@ -1517,12 +1846,14 @@ export const BUBBLE_FRAG = /* glsl */ `#version 300 es
 ${COMMON}
 in vec2 vUV;
 in vec3 vWorldPos;
+${PANE_CLIP}
 uniform float uWaterY;
 out vec4 fragColour;
 void main() {
   vec2 d = vUV * 2.0 - 1.0;
   float r2 = dot(d, d);
   if (r2 > 1.0) discard;
+  if (!seenThroughThisPane(vWorldPos)) discard;
   float r = sqrt(r2);
   // A bubble is a thin shell of air in water: almost invisible in the middle,
   // with a bright rim where the view grazes the surface and total internal
@@ -1533,5 +1864,179 @@ void main() {
   colour *= transmittance(max(0.0, uWaterY - vWorldPos.y));
   float alpha = rim * 0.55 + highlight * 0.9;
   fragColour = vec4(tonemap(colour * uExposure), alpha);
+}
+`;
+
+/**
+ * The specks drifting in the water (see render/particulate.ts).
+ *
+ * Each is far smaller than a pixel from any normal viewing distance: a speck a
+ * fifth of a millimetre across, half a metre away, is under half a pixel. A
+ * point that small jumps between pixels as it drifts and looks like noise, so
+ * each is drawn at least two pixels wide with its brightness spread over that
+ * area — the same total light, without the shimmer.
+ */
+export const MOTE_VERT = /* glsl */ `#version 300 es
+${COMMON}
+layout(location = 0) in vec3 aPosition;
+layout(location = 1) in vec2 aSpeck;   // radius in metres, a random number per speck
+
+uniform mat4 uViewProjection;
+uniform vec3 uCameraPos;
+uniform float uPixelScale;   // pixels across for one metre at one metre away
+
+out vec3 vWorldPos;
+out float vCover;
+out float vSeed;
+
+// Bent through this pass's pane like the scene geometry; see APPARENT_POSITION.
+${APPARENT_POSITION}
+
+void main() {
+  vWorldPos = aPosition;
+  vSeed = aSpeck.y;
+  gl_Position = uViewProjection * vec4(apparentPosition(aPosition), 1.0);
+  float diameter = 2.0 * aSpeck.x * uPixelScale / max(gl_Position.w, 1e-3);
+  float drawn = max(diameter, 2.0);
+  gl_PointSize = drawn;
+  // The fraction of the drawn square the speck really covers.
+  vCover = 0.785398 * diameter * diameter / (drawn * drawn);
+}
+`;
+
+export const MOTE_FRAG = /* glsl */ `#version 300 es
+${COMMON}
+${SHADOW}
+in vec3 vWorldPos;
+in float vCover;
+in float vSeed;
+${PANE_CLIP}
+
+uniform sampler2D uCaustics;
+uniform vec2 uCausticsExtent;
+uniform float uWaterY;
+uniform float uTime;
+
+out vec4 fragColour;
+
+void main() {
+  // Only where this pass's pane is the one the eye sees it through; see
+  // APPARENT_POSITION.
+  if (!seenThroughThisPane(vWorldPos)) discard;
+
+  // --- The light reaching the speck ---
+  //
+  // The caustic map holds the pattern where the light lands on the sand. Part
+  // way down, the rays have had less distance to gather, and for gentle
+  // ripples how far the light is from even grows in step with the distance
+  // below the surface — so the pattern at a speck is the one on the sand where
+  // its ray lands, faded by how far down it is.
+  vec3 Lw = normalize(uLightDirWater);
+  float depthBelow = max(0.0, uWaterY - vWorldPos.y);
+  float waterDepth = uWaterY - uWaterMin.y;
+  vec2 floorXZ = vWorldPos.xz - Lw.xz / Lw.y * (vWorldPos.y - uWaterMin.y);
+  vec2 cuv = vec2(
+    (floorXZ.x + uCausticsExtent.x) / (2.0 * uCausticsExtent.x),
+    (floorXZ.y + uCausticsExtent.y) / uCausticsExtent.y
+  );
+  float caustic = causticLight(texture(uCaustics, cuv).r, clamp(depthBelow / waterDepth, 0.0, 1.0));
+  vec3 arriving = uLightColour * caustic * lightVisibility(vWorldPos, Lw) * transmittance(depthBelow);
+
+  // --- The light it sends towards the eye ---
+  //
+  // A speck many times larger than the wavelength of light removes twice the
+  // light that falls on its outline. Half of that is diffraction, bent only a
+  // few degrees onward from the light's path; the other half is reflected and
+  // refracted by the speck's surface and goes out in every direction. So a
+  // speck looked at from the side glows faintly, and one between the eye and
+  // the lamp shines. Irregular specks tumble slowly in the current, and the
+  // part of their light that comes off a flat face brightens for a second or
+  // two when that face turns towards the eye.
+  vec3 V = normalize(uCameraPos - vWorldPos);
+  float cosTheta = dot(-Lw, V);
+  float tumble = pow(max(0.0, sin(6.2831853 * vSeed + uTime * (0.15 + 0.3 * fract(vSeed * 7.31)))), 8.0);
+  float phase = 0.5 * phaseHG(cosTheta, 0.9) + 0.5 * (0.25 / PI) * (0.6 + 3.0 * tumble);
+  vec3 albedo = vec3(0.80, 0.78, 0.70);   // pale, faintly warm: plant and food debris
+  vec3 radiance = arriving * albedo * 2.0 * phase + albedo * uAmbient * 0.25;
+  radiance *= uWaterTint;
+
+  // Spread the speck's light over the drawn square: a soft spot whose average
+  // over the square is the fraction the speck really covers.
+  vec2 pc = gl_PointCoord * 2.0 - 1.0;
+  float r2 = dot(pc, pc);
+  float alpha = vCover >= 0.785
+    ? smoothstep(1.0, 0.8, sqrt(r2))
+    : min(1.0, vCover * exp(-4.5 * r2) / 0.1736);
+  fragColour = vec4(tonemap(radiance * uExposure), alpha);
+}
+`;
+
+/**
+ * One step of the fine ripple layer (see render/ripples.ts): the wave
+ * equation, with the damping of the surface film, on a grid whose edges are
+ * the glass. Reading past the edge returns the edge itself, which is what a
+ * wall that reflects waves amounts to.
+ */
+export const RIPPLE_STEP_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+precision highp sampler2D;
+
+uniform sampler2D uState;     // r: height, mm; g: its rate of change, mm/s
+uniform vec2 uCell;           // metres between grid points, x and z
+uniform vec2 uOrigin;         // world x, z of the grid's corner
+uniform float uDt;
+uniform float uSpeed2;
+uniform float uViscosity;
+uniform float uDecay;
+uniform int uTouchCount;
+uniform vec4 uTouchA[16];     // x, z, surface speed given at the centre (mm/s), 1 / (2 sigma^2)
+uniform vec4 uTouchB[16];     // 1 / (2 w^2) of the wider part, its relative height, 1 if a displacement
+
+out vec4 state;
+
+vec2 at(ivec2 p) {
+  p = clamp(p, ivec2(0), textureSize(uState, 0) - 1);
+  return texelFetch(uState, p, 0).rg;
+}
+
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec2 c = at(p);
+  vec2 lap = (at(p - ivec2(1, 0)) + at(p + ivec2(1, 0)) - 2.0 * c) / (uCell.x * uCell.x)
+           + (at(p - ivec2(0, 1)) + at(p + ivec2(0, 1)) - 2.0 * c) / (uCell.y * uCell.y);
+  float v = c.g + uDt * (uSpeed2 * lap.r + uViscosity * lap.g - uDecay * c.g);
+
+  vec2 pos = uOrigin + (vec2(p) + 0.5) * uCell;
+  float lift = 0.0;
+  for (int i = 0; i < 16; i++) {
+    if (i >= uTouchCount) break;
+    vec2 d = pos - uTouchA[i].xy;
+    float d2 = dot(d, d);
+    float shape = uTouchA[i].z * (exp(-d2 * uTouchA[i].w) - uTouchB[i].y * exp(-d2 * uTouchB[i].x));
+    if (uTouchB[i].z > 0.5) lift += shape; else v += shape;
+  }
+
+  state = vec4(c.r + uDt * v + lift, v, 0.0, 1.0);
+}
+`;
+
+/** The ripple layer's height and slopes, for the shaders that draw with it. */
+export const RIPPLE_RESOLVE_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uState;
+uniform vec2 uCell;
+out vec4 result;
+float h(ivec2 p) {
+  p = clamp(p, ivec2(0), textureSize(uState, 0) - 1);
+  return texelFetch(uState, p, 0).r;
+}
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  // Heights are in millimetres, so the slopes come out a thousand times too
+  // big in metres per metre.
+  float gx = (h(p + ivec2(1, 0)) - h(p - ivec2(1, 0))) / (2.0 * uCell.x) * 1e-3;
+  float gz = (h(p + ivec2(0, 1)) - h(p - ivec2(0, 1))) / (2.0 * uCell.y) * 1e-3;
+  result = vec4(h(p), gx, gz, 1.0);
 }
 `;

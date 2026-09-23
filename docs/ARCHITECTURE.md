@@ -10,7 +10,7 @@ docs/SIMULATION-SPEC.md          the numerical contract both ports implement
 preview/                         desktop: TypeScript + WebGL2
   src/sim/                       the simulation
   src/render/                    a preview renderer
-  src/test/                      48 tests, run with `npm test`
+  src/test/                      56 tests, run with `npm test`
 
 ios/Aquarium/                    phone: Swift + Metal + ARKit
   Sources/Sim/                   the same simulation, ported
@@ -99,6 +99,24 @@ Seven passes, in this order:
 6. **Glass** — the front pane, which is the phone's own screen.
 7. **Post** — tone mapping and camera-matched grain.
 
+The desktop preview (`preview/src/render/`) has no camera or glass pass, and
+has one the phone does not have yet: **shadows**, drawn after the caustics. The
+body and the plants are rendered as depth from the light (after it bends at the
+surface), and the fins into a second map holding the light they let through.
+The scene shaders look both up, with a soft edge whose width grows with the gap
+between the thing casting the shadow and the surface receiving it. The scene
+pass also draws a few hundred specks drifting in the water (`particulate.ts`),
+lit by the same caustics and shadows.
+
+The preview's water surface (`preview/src/sim/water.ts`) is also solved
+differently from the phone's: as the tank's standing waves, each advanced
+exactly, rather than as a wave equation on a grid. See spec §3.1. On top of it,
+`render/ripples.ts` runs a much finer ripple layer on the graphics card for the
+rings touches send out, replayed from a log the surface keeps; it is drawn,
+not simulated against. A fish swimming just under the surface also holds it in
+a shallow dip over its back (`World.holdSurfaceOverFish`), which the sand
+shows as a faint patch of light following the fish.
+
 **Why the volume pass sits where it does.** It has to come after the scene and
 before the surface, because the absorption applies to light travelling from the
 object to the eye, and the surface then bends whatever is left. Doing the surface
@@ -109,10 +127,21 @@ water.
 **The desktop preview has no camera image**, so it draws a room instead: walls,
 a desk for the tank to stand on, and the lamp over it (`preview/src/render/scenery.ts`).
 The glass is drawn as glass there too, clear with green edges, so the room shows
-through it. The room seen through the water is shifted by the same apparent-depth
-rule as everything in the tank, which is why it breaks at the waterline. The
+through it. The room seen through the tank is drawn where it is rather than bent through
+the water, which a real tank would do; that is still to come. The
 driftwood, stones and extra planting are also preview-only so far; the Swift
 renderer still has the original three plants.
+
+**Refraction at the panes.** In the desktop preview, everything under the water is
+drawn where it *appears* to be, not where it is: each vertex is moved onto the
+line of sight that Snell's law gives through the pane it is seen through, so the
+tank looks shallower, the fish looks nearer and bigger, and the view changes
+shape as you walk round. The scene is drawn once per pane the eye can see (at
+most three) plus once for what is out of the water, and each pass keeps only the
+pixels whose line of sight really crosses its pane — so an object near a corner
+of the tank shows up twice, as it does in a real one. `apparentPosition` in
+`shaders.ts` is the calculation; `refraction.ts` is the same thing in
+TypeScript, for the tests. The phone app does not do this yet.
 
 Everything before the post pass works in half-float. The water and the thin-film
 colours on the fish's flanks both have a much wider range than eight bits can
@@ -179,7 +208,7 @@ knock through its lateral line.
 
 ## Testing
 
-`preview/src/test/` holds 48 tests in four files:
+`preview/src/test/` holds 56 tests in five files:
 
 - `physics.test.js` — conservation, stability, the water's sloshing period against
   the analytic result, pellet terminal velocity against Schiller-Naumann.
@@ -188,6 +217,10 @@ knock through its lateral line.
 - `behaviour.test.js` — that decisions have hysteresis, that drives really
   accumulate and discharge, that the drive hierarchy holds under conflict, that a
   run is reproducible from its seed.
+- `optics.test.js` — refraction at the panes: Snell's law at every crossing, a
+  tank looking shallower by the index of water, an upright stick looking
+  shorter through the surface by the textbook ratio, and the double image at a
+  corner.
 - `scenery.test.js` — that the stones, wood and plants stay inside the glass and
   under the water (plants wherever the current sways them), that the stones are
   low enough for a fish that cannot see them, and that the fish's resting spot is

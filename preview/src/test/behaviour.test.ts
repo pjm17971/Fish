@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import { World } from '../sim/world.js';
 import { Intention } from '../sim/brain.js';
 import { TANK } from '../sim/config.js';
-import { v3 } from '../sim/math.js';
+import { v3, sub, normalize, quatRotateInv } from '../sim/math.js';
 import { Rng } from '../sim/rng.js';
 
 /** Run the world for `seconds` at a fixed 60 fps, calling `onTick` each frame. */
@@ -251,6 +251,56 @@ test('a hungry fish finds and eats dropped food', () => {
   assert.ok(
     fedIn >= seeds.length - 1,
     `the fish only managed to feed in ${fedIn} of ${seeds.length} runs`,
+  );
+});
+
+test('a pellet just beside the snout needs a small turn, not an about-turn', () => {
+  // The mouth is at the front of the fish, so a pellet a few millimetres to one
+  // side of it is only a few degrees off the line the fish is swimming along.
+  // The steering once aimed the fish's middle at a point shifted back from the
+  // pellet by the mouth's offset — right beside the fish — and read every such
+  // pellet as a right-angle turn. The fish then pivoted on the spot instead of
+  // closing the last centimetre, which it can only do by swimming forward.
+  // Within two centimetres of its food it was pivoting most of the time.
+  const toTarget = v3();
+  const local = v3();
+  const fwd = v3();
+  let worst = 0;
+  for (const side of [-1, 1]) {
+    for (const [across, ahead] of [[0.004, 0.0], [0.006, 0.004], [0.008, 0.008], [0.005, 0.012]]) {
+      const world = new World({ seed: 71, timeScale: 1 });
+      world.brain.drives.hunger = 0.9;
+      run(world, 0.5);
+      const loco = world.locomotion;
+      const mouth = world.brain.mouth;
+      loco.forward(fwd);
+      const h = Math.hypot(fwd.x, fwd.z);
+      const fx = fwd.x / h;
+      const fz = fwd.z / h;
+      // A waterlogged pellet hanging level with the mouth.
+      const pellet = world.food.pellets[0];
+      pellet.alive = true;
+      pellet.floating = false;
+      pellet.density = 1000;
+      pellet.age = 0;
+      pellet.integrity = 1;
+      pellet.position.x = mouth.x + fx * ahead - fz * across * side;
+      pellet.position.y = mouth.y;
+      pellet.position.z = mouth.z + fz * ahead + fx * across * side;
+      world.brain.intention = 'strike';
+      world.step(1 / 60);
+      assert.equal(world.brain.intention, 'strike', 'the fish did not go for the pellet');
+
+      sub(toTarget, world.brain.goal.target, loco.position);
+      normalize(toTarget, toTarget);
+      quatRotateInv(local, loco.orientation, toTarget);
+      const turn = Math.abs(Math.atan2(local.x, local.z));
+      worst = Math.max(worst, turn);
+    }
+  }
+  assert.ok(
+    worst < (35 * Math.PI) / 180,
+    `a pellet beside the snout asked for a ${((worst * 180) / Math.PI).toFixed(0)} degree turn`,
   );
 });
 

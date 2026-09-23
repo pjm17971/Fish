@@ -47,7 +47,19 @@ The same applies to the rest of it:
   turns. It is not a texture, because in a real fish it is not a pigment.
 - The **caustics** on the gravel are computed by refracting light through the
   actual simulated surface, so when you tilt the phone and the water sloshes, the
-  light on the floor sloshes with it.
+  light on the floor sloshes with it. In the desktop preview the surface is
+  solved as the tank's own standing waves, each ringing at the speed real water
+  gives a wave of its length. At rest it is nearly still, as a real tank is
+  away from the filter, and the light on the sand barely moves. When something
+  touches the water — the fish coming up for air, a bubble — a fine ripple
+  layer on the graphics card carries the centimetre rings it sends out, and
+  they throw rings of light across the sand.
+- Fine specks drift in the desktop preview's water, carried by the current and
+  settling slowly. They are nearly invisible until the lamp catches them.
+- In the desktop preview, the fish, its fins and the plants **cast shadows**
+  that are sharp where they touch the sand and soften with height, which is
+  how the eye judges how far above the floor something is. The fins' shadows
+  are tinted red, because the fins are see-through and red.
 
 `docs/RESEARCH.md` sets out what was surveyed and what was chosen for each part,
 with sources. `docs/SIMULATION-SPEC.md` is the numerical model. `docs/ARCHITECTURE.md`
@@ -93,7 +105,7 @@ To run the tests:
 
 ```sh
 cd preview
-npm test           # 48 tests
+npm test           # 56 tests
 ```
 
 ---
@@ -201,10 +213,15 @@ fish is just a slightly better swimmer than it should be.
 dragging that much fin area genuinely does turn slowly, but this is at the wide
 end of plausible rather than the middle of it.
 
-**Feeding does not always work.** The fish finds and eats the food in most runs
-but not every one. Real fish miss constantly, and the missing is a good part of
-what makes feeding look alive, so this is only partly a defect — but the strike
-geometry is at the edge of reliable and it could be better.
+**Feeding does not always work.** Given three pinches of food half a minute
+apart, the fish eats at least once in about 85 runs in 100 (76 of 90 seeds,
+measured with `preview/tools/probe-feedstats.mjs`). Real fish miss constantly,
+and the missing is a good part of what makes feeding look alive, so this is
+only partly a defect. What is left is mostly reach: the fish rises to floating
+food with its body level rather than tilting its head up, so its mouth usually
+stops seven to nine millimetres under the pellet, right at the edge of the nine
+millimetres the suction strike can cover. A real betta angles up at the
+surface; this one barely pitches at all while it is swimming slowly.
 
 **The scenery is for looking at, not for swimming round.** The desktop preview
 has driftwood, stones, seven kinds of plant and a room around the tank, but the

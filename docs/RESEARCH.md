@@ -314,6 +314,68 @@ photon/ray-bundle construction; the reason for doing it rather than scrolling a
 caustics texture is that these caustics *are* the water surface, so when you tilt
 the phone and the water sloshes, the light on the floor sloshes with it.
 
+The network of bright lines in a real tank comes from ripples one to five
+centimetres long, which curve the surface enough to bring light to a focus at a
+depth of a few centimetres. The grid wave equation gets those badly wrong: it
+moves every wave at the long-wave speed, 0.91 m/s, where a three-centimetre
+ripple really travels at about 0.25 m/s, and it had no source of small ripples
+away from the outlet, so the light it focused varied by only about 2% across the
+floor.
+
+The desktop preview therefore solves the surface a different way. A rectangular
+tank with vertical walls has a known set of standing waves (cosines across each
+direction), and each one oscillates independently at the frequency linear
+water-wave theory gives, `omega^2 = (g k + (sigma / rho) k^3) tanh(k h)`, which
+is right from the whole-tank slosh down to ripples where surface tension
+matters. Each is advanced as an exact damped oscillator. Short waves are damped
+by the organic film on every aquarium's surface, at about `k sqrt(nu omega / 8)`
+(Lamb 1932; Miles 1967), which is what stops a tank glittering all over. The
+filter's return stream keeps the surface moving: a few patches at the outlet
+pushed by band-limited noise, and small random pushes to every mode across the
+surface standing in for the eddies the current carries. Nothing is added to
+the surface after that; the caustics come from the simulated ripples alone.
+
+How much the surface moves at rest is the main choice. Looking at a real
+planted tank, the surface away from the filter is nearly still and the light on
+the sand barely moves; it dances only where something touches the water. So
+the resting agitation is small (rms slope 0.015 centred on 5 cm, which leaves
+the light on the sand varying by about 6%). Sharp bright lines need ripples
+short enough to bring light to a focus within the 8.5 cm of water, about a
+centimetre (a gentle ripple focuses light at roughly `4 / (slope * k)` below
+it), and ripples that short, kept going everywhere, rise and fall fifteen to
+thirty times a second, which reads as flicker.
+
+The rings a touch sends out are those centimetre ripples, and the 4.4 mm grid
+cannot hold them: a grid needs several points per wavelength. The desktop
+preview therefore also runs a fine ripple layer on the graphics card, on a 1.4
+mm grid, as Evan Wallace's WebGL water demo does. It is a plain wave equation,
+one speed for every wave, which for these ripples is accurate rather than a
+shortcut: capillary-gravity ripples from one to three centimetres long all
+travel at 23 to 25 cm/s. Every disturbance of the coarse surface is replayed
+into it, less the broad part the coarse grid already carries, and its damping
+matches the surface film's. A gulp of air leaves a hollow of about 50 mm^3 (the
+snout, about 4 mm across, comes about 3 mm through the surface; an estimate),
+which fills in and sends a ring of light across the sand.
+
+An earlier version added twelve fixed travelling waves, down to 9 mm long, on
+top of the grid simulation. That looked too flickery: the curvature a wave adds
+grows with how short it is, so the shortest waves drew most of the pattern, and
+a 9 mm ripple rises and falls 28 times a second.
+
+### Specks in the water
+
+Fresh water in a planted tank carries fine detritus, a few tenths of a
+millimetre across. The desktop preview simulates 900 of them (about 120 per
+litre, a judgement for a clean filtered tank, not a measured figure): carried by
+the bulk flow, settling at their Stokes speed, jostled slightly by small-scale
+turbulence, and put back into the water when they reach the sand. Each is lit
+by the caustics and shadows where it is. Particles many times larger than the
+wavelength of light remove twice the light falling on their outline, half by
+diffraction into a narrow forward cone and half reflected and refracted in all
+directions; that is the brightness model. They are smaller than a pixel from any
+normal distance, so each is drawn two pixels wide with its light spread over
+that area.
+
 ### The fish's colour
 
 A betta's blue-green iridescence is not a pigment. It is **thin-film

@@ -23,7 +23,6 @@ import {
   ROOM,
   BuiltMesh,
 } from '../render/scenery.js';
-import { MAX_OCCLUDERS, FISH_OCCLUDERS } from '../render/shaders.js';
 
 type Vertex = { x: number; y: number; z: number; kind: number; sway: number };
 
@@ -124,15 +123,6 @@ test('the resting spot is left clear of wood and stone', () => {
       v.y < TANK.floorY + 0.065,
   );
   assert.equal(clash, undefined, 'hardscape in the resting spot');
-});
-
-test('the shadow spheres fit the shader, with room left for the fish', () => {
-  const { occluders } = buildHardscape();
-  assert.ok(occluders.length > 0);
-  assert.ok(
-    occluders.length <= MAX_OCCLUDERS - FISH_OCCLUDERS,
-    `${occluders.length} hardscape spheres, but the shader only takes ${MAX_OCCLUDERS - FISH_OCCLUDERS}`,
-  );
 });
 
 test('the orbit camera cannot leave the room', () => {
