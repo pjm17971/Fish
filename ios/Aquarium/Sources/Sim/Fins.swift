@@ -388,24 +388,35 @@ final class FinCloth {
 /// whole underside. Get these wrong and it reads as a generic fish.
 func buildFins(morphology: Morphology) -> [FinCloth] {
     let segs = morphology.segments
-    let n = segs.count
     let L = morphology.standardLength
+    // Fin positions are given as fractions of the *body* length, so they index
+    // the body segments only. Scaling by the whole list, caudal segments
+    // included, slid every fin a quarter of the way further back than intended
+    // and rooted the rear of the dorsal and anal fins on the tail fin.
+    let nBody = segs.filter { !$0.isCaudal }.count
 
     func segAt(_ s: Double) -> Int {
-        max(0, min(n - 1, Int((s * Double(n) - 0.5).rounded())))
+        max(0, min(nBody - 1, Int((s * Double(nBody) - 0.5).rounded())))
     }
 
     var fins: [FinCloth] = []
 
     // --- Caudal: rays radiate from the peduncle and fan vertically ---
+    //
+    // The peduncle is the last segment of the *body*, not the last in the list:
+    // the list carries on past it with the caudal segments, which are the tail
+    // fin as the propulsion sees it. Rooting the sheet on the last of those put
+    // the whole visible tail fin one fin-length behind the body, with a gap
+    // between them, and made the fish half again as long as it is.
     do {
         let spec = Fins.caudal
+        let peduncle = nBody - 1
         var attachments: [FinAttachment] = []
         for r in 0..<spec.rows {
             let t = Double(r) / Double(spec.rows - 1)
             attachments.append(FinAttachment(
-                segment: n - 1, offNormal: 0,
-                offUp: (t - 0.5) * segs[n - 1].depth * 1.2
+                segment: peduncle, offNormal: 0,
+                offUp: (t - 0.5) * segs[peduncle].depth * 0.85
             ))
         }
         // Half-angle set so the trailing edge sweeps the intended span:
