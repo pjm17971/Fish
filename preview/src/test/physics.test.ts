@@ -404,7 +404,8 @@ test('a fish gliding just under the surface dips it over its back, by a fraction
   loco.velocity.y = 0;
   loco.velocity.z = forward.z * speed;
   loco.angularVelocity.x = loco.angularVelocity.y = loco.angularVelocity.z = 0;
-  (world as unknown as { holdSurfaceOverFish(): void }).holdSurfaceOverFish();
+  // A long step, so the speed it averages over a tail beat has caught up.
+  (world as unknown as { holdSurfaceOverFish(dt: number): void }).holdSurfaceOverFish(10);
   const hold = (world as unknown as { surfaceHold: Float32Array }).surfaceHold;
 
   let lowest = 0;

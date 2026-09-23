@@ -105,7 +105,7 @@ To run the tests:
 
 ```sh
 cd preview
-npm test           # 47 tests
+npm test           # 49 tests
 ```
 
 ---

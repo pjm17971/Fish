@@ -8,7 +8,7 @@
  * feel very slightly late, in a way that is almost impossible to find later.
  */
 
-import { Vec3, v3, set, copy, sub, scale, clamp, add, cross, smoothstep } from './math.js';
+import { Vec3, v3, set, copy, sub, scale, clamp, smoothstep, expApproachV } from './math.js';
 import { DEFAULT_WORLD_CONFIG, GRAVITY, TANK, WATER, WorldConfig } from './config.js';
 import { buildMorphology, Morphology } from './morphology.js';
 import { FishBody, MotorCommand, createMotorCommand } from './fishBody.js';
@@ -65,6 +65,8 @@ export class World {
 
   /** Where the fish holds the surface, at each node, m; see holdSurfaceOverFish(). */
   private readonly surfaceHold: Float32Array;
+  /** The fish's velocity averaged over about a tail beat, m/s. */
+  private readonly glideVelocity = v3();
 
   constructor(config: Partial<WorldConfig> = {}) {
     this.config = { ...DEFAULT_WORLD_CONFIG, ...config };
@@ -185,7 +187,7 @@ export class World {
 
     // 5. The fish disturbs the surface it just moved through.
     this.coupleFishToSurface(frameDt);
-    this.holdSurfaceOverFish();
+    this.holdSurfaceOverFish(frameDt);
 
     // 6. Food, then the water it landed in.
     this.food.step(this.water, this.flow, frameDt);
@@ -265,21 +267,27 @@ export class World {
    * run — the dip simply travels with the fish, and when the fish turns away
    * or dives, the surface it was holding springs back and rings a little.
    *
-   * Two things are left out. The fish speeding up and slowing down also
+   * Some things are left out. The fish speeding up and slowing down also
    * changes the pressure at the surface, but it does so with every tail beat,
    * and computed frame by frame it jittered enough to set the surface ringing
-   * by millimetres. And only horizontal motion counts; the fish rising or
-   * sinking near the surface is coupleFishToSurface's.
+   * by millimetres; the tail's beat and the body's turning are left out for
+   * the same reason (see below). And only horizontal motion counts; the fish
+   * rising or sinking near the surface is coupleFishToSurface's.
    */
-  private holdSurfaceOverFish(): void {
+  private holdSurfaceOverFish(dt: number): void {
     const water = this.water;
     const hold = this.surfaceHold;
     const segs = this.body.segments;
     const morph = this.morphology.segments;
     const reach = WATER.fishHoldReach;
     const deepest = WATER.fishHoldDepth;
+    // The picture here is of a body gliding steadily along, so it takes the
+    // fish's speed averaged over about one beat of its tail (a brisk cruise
+    // is three beats a second). The speed itself surges with every beat and
+    // jumps when the fish darts or bumps the glass; followed frame by frame
+    // it set the surface ringing.
+    const glide = expApproachV(this.glideVelocity, this.glideVelocity, this.locomotion.velocity, 3, dt);
     let live = false;
-    let fastest2 = 0;
     hold.fill(0);
     for (let i = 0; i < segs.length; i++) {
       const st = segs[i];
@@ -289,13 +297,12 @@ export class World {
       const halfHeight = 0.5 * sg.depth;
       if (centreDepth - halfHeight > deepest) continue;
 
-      // How this slice is moving: the fish as a whole, its turning, and its
-      // own bending.
-      sub(scratch.tmp, scratch.segWorld, this.locomotion.position);
-      cross(scratch.segVel, this.locomotion.angularVelocity, scratch.tmp);
-      add(scratch.segVel, scratch.segVel, this.locomotion.velocity);
-      this.locomotion.dirToWorld(st.velLocal, scratch.tmp);
-      add(scratch.segVel, scratch.segVel, scratch.tmp);
+      // The fish's gliding speed, the same for every slice. The tail's beat
+      // and the body's swing as it turns are back-and-forth motions this
+      // picture cannot describe: counted as if each slice were gliding at
+      // its own speed, they gave dips of millimetres whenever the fish
+      // turned at the surface, and a ring after it like a stone dropped in.
+      copy(scratch.segVel, glide);
 
       // Its doublet: the water it carries along each of its own axes, times
       // its speed along that axis. Endways only its own volume; sideways and
@@ -350,7 +357,6 @@ export class World {
         const mz = (2 * weight * scratch.dipole.z) / (4 * Math.PI * GRAVITY);
         const ux = scratch.segVel.x;
         const uz = scratch.segVel.z;
-        fastest2 = Math.max(fastest2, ux * ux + uz * uz);
         const lift = depth * depth + core;
         const i0 = Math.max(0, Math.floor((x0 - reach - water.worldX(0)) / water.dx));
         const i1 = Math.min(water.nx - 1, Math.ceil((x0 + reach - water.worldX(0)) / water.dx));
@@ -378,12 +384,12 @@ export class World {
 
     // The picture above is for water that is disturbed only a little, and
     // it breaks down when the fish's back comes within a few millimetres of
-    // the surface: there it can call for dips of several millimetres. Water
-    // moving at speed u lowers the surface by u^2 / 2g, and past a body it
-    // runs at most about one and a half times the body's own speed, so the
-    // most any part of the fish can do is about half of U^2 / g. Hold the
-    // shape to that, easing into the limit rather than cutting it off.
-    const limit = (0.5 * fastest2) / GRAVITY;
+    // the surface, where it can call for more than moving water can do.
+    // Water moving at speed u lowers the surface by u^2 / 2g, and past a body
+    // it runs at most about one and a half times the body's own speed, so
+    // the most the fish can do is about half of U^2 / g. Hold the shape to
+    // that, easing into the limit rather than cutting it off.
+    const limit = (0.5 * (glide.x * glide.x + glide.z * glide.z)) / GRAVITY;
     if (live && limit > 1e-7) {
       for (let k = 0; k < hold.length; k++) {
         if (hold[k] !== 0) hold[k] = limit * Math.tanh(hold[k] / limit);
