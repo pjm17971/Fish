@@ -257,8 +257,15 @@ void main() {
  * Four layers, in the order light meets them:
  *   1. a thin specular mucus coat,
  *   2. thin-film interference in the guanine platelets of the scales,
- *   3. the pigment layer, with a scale pattern,
+ *   3. the pigment layer, with the scales laid over it,
  *   4. subsurface scattering, which is what stops thin parts reading as plastic.
+ *
+ * Plus the head, which has no scales: an eye, the edge of the gill cover, and
+ * the mouth. Without an eye nothing reads as an animal, however good the rest
+ * of the shading is.
+ *
+ * Positions on the skin come in as millimetres (see meshes.ts), so the scales
+ * and the eye keep their real size wherever they are on the body.
  */
 export const FISH_FRAG = /* glsl */ `#version 300 es
 ${COMMON}
@@ -280,45 +287,120 @@ uniform float uTime;
 
 out vec4 fragColour;
 
+// Where the eye sits: millimetres back from the snout, height above the
+// centreline, and radius. A betta's eye is large, about a sixteenth of its
+// body length across, and set high and far forward.
+const vec3 EYE = vec3(4.9, 1.5, 1.35);
+// Where the gill cover's edge crosses the centreline, in millimetres from the
+// snout. The head in front of it has no scales.
+const float GILL_ARC = 9.4;
+// Size of one scale, in millimetres: about thirty along the flank, as a
+// betta has.
+const float SCALE_MM = 1.1;
+
+// Directions on the surface in which the two coordinates of \`uv\` increase,
+// found from how they change across the pixel. Saves carrying a tangent frame
+// in every vertex for something the rasteriser already knows.
+void surfaceFrame(vec3 N, vec2 uv, out vec3 T, out vec3 B) {
+  vec3 dp1 = dFdx(vWorldPos);
+  vec3 dp2 = dFdy(vWorldPos);
+  vec2 duv1 = dFdx(uv);
+  vec2 duv2 = dFdy(uv);
+  vec3 dp2perp = cross(dp2, N);
+  vec3 dp1perp = cross(N, dp1);
+  T = dp2perp * duv1.x + dp1perp * duv2.x;
+  B = dp2perp * duv1.y + dp1perp * duv2.y;
+  T = normalize(T + vec3(1e-9));
+  B = normalize(B + vec3(1e-9));
+}
+
 void main() {
   if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
-  vec3 N = normalize(vNormal);
+  vec3 N0 = normalize(vNormal);
+  vec3 N = N0;
   vec3 V = normalize(vView);
   vec3 L = normalize(uLightDir);
-  vec3 H = normalize(V + L);
 
-  float NdotV = max(dot(N, V), 1e-4);
-  float NdotL = max(dot(N, L), 0.0);
-  float NdotH = max(dot(N, H), 0.0);
+  float around = vUV.x;     // mm round from the top of the back
+  float arcMm = vUV.y;      // mm back from the snout
+  float along = vExtra.x;   // fraction of body length
+  float height = vExtra.y;  // mm above the centreline
+
+  vec3 Tu, Tarc;
+  surfaceFrame(N0, vec2(around, arcMm), Tu, Tarc);
 
   // --- Scales ---
   //
-  // A hexagonal-ish lattice running along the body. The pattern perturbs both
-  // the normal and the film thickness, so the iridescence breaks up into
-  // individual scales rather than sliding across the fish as one sheet.
-  float along = vExtra.x;
-  vec2 scaleUV = vec2(vUV.x * 26.0, along * 34.0);
-  vec2 cell = floor(scaleUV);
-  // Offset alternate rows, which is how fish scales actually tile.
-  scaleUV.x += mod(cell.y, 2.0) * 0.5;
-  cell = floor(scaleUV);
-  vec2 local = fract(scaleUV) - 0.5;
-  float scaleEdge = smoothstep(0.42, 0.5, max(abs(local.x), abs(local.y) * 0.85));
-  float scaleJitter = hash21(cell) - 0.5;
+  // Staggered rows of round scales, each overlapping the one behind it, so
+  // what shows of each is its rounded rear edge — the pattern that reads as
+  // "fish". Found by testing the scales around this point from the front
+  // backwards and keeping the first that covers it, since the front one lies
+  // on top. The centres are nudged a little at random so the rows never line
+  // up into a grid.
+  //
+  // What the eye picks up is not the scale but the fine curved shadow just
+  // behind the rim of the scale in front, so that is all that is drawn in the
+  // pigment: a thin arc, and a gentle lightening towards each scale's exposed
+  // rear. Outlining every scale, or colouring each one separately, is what
+  // turns a flank into floor tiles.
+  vec2 g = vec2(around, arcMm) / SCALE_MM;
+  float row0 = floor(g.y);
+  vec2 rel = vec2(0.0);
+  vec2 cellId = vec2(0.0);
+  float chosenRow = row0;
+  for (int k = -1; k <= 1; k++) {
+    float row = row0 + float(k);
+    float shift = 0.5 * mod(row, 2.0);
+    float col = floor(g.x - shift + 0.5);
+    vec2 c = vec2(col + shift, row);
+    c += (vec2(hash21(c), hash21(c + 17.3)) - 0.5) * 0.14;
+    vec2 dv = (g - c) / 0.74;
+    if (dot(dv, dv) < 1.0) { rel = dv; cellId = c; chosenRow = row; break; }
+  }
+  // Distance past the rims of the row in front, in scale radii.
+  float pastRim = 1.0;
+  {
+    float row = chosenRow - 1.0;
+    float shift = 0.5 * mod(row, 2.0);
+    float col = floor(g.x - shift);
+    for (int m = 0; m <= 1; m++) {
+      vec2 c = vec2(col + float(m) + shift, row);
+      c += (vec2(hash21(c), hash21(c + 17.3)) - 0.5) * 0.14;
+      pastRim = min(pastRim, length(g - c) / 0.74 - 1.0);
+    }
+  }
+  // Scales smaller than a couple of pixels would only alias into a moiré, so
+  // the pattern fades out with distance; the head in front of the gill cover
+  // has none.
+  float footprint = max(fwidth(g.x), fwidth(g.y));
+  float scaleVis = (1.0 - smoothstep(0.1, 0.35, footprint))
+                 * smoothstep(GILL_ARC - 0.5, GILL_ARC + 2.5, arcMm);
+  float scaleJitter = hash21(cellId) - 0.5;
+  float aaRim = footprint * 2.0 / 0.74 + 0.02;
+  float rimShadow = 1.0 - smoothstep(0.0, 0.07 + aaRim, max(0.0, pastRim));
+  float exposed = smoothstep(-0.7, 0.9, rel.y);
+  // Each scale is a slightly domed plate, tilted so its rear edge lifts.
+  N = normalize(N + (Tu * rel.x + Tarc * (rel.y + 0.3)) * 0.07 * scaleVis);
 
-  // Perturb the normal so each scale is a slightly domed plate.
-  vec3 tangent = normalize(cross(N, vec3(0.0, 1.0, 0.0)) + vec3(1e-4));
-  vec3 bitangent = cross(N, tangent);
-  // Gentle doming. At 0.35 every scale's rim was a grazing angle and the
-  // iridescence lit up across the whole flank, which read as pink-white
-  // rather than red with a sheen.
-  N = normalize(N + (tangent * local.x + bitangent * local.y) * 0.16 * (1.0 - scaleEdge));
-  NdotV = max(dot(N, V), 1e-4);
-  NdotL = max(dot(N, L), 0.0);
-  NdotH = max(dot(N, normalize(V + L)), 0.0);
+  // --- Eye ---
+  float eyeD = length(vec2(arcMm - EYE.x, height - EYE.y)) / EYE.z;
+  float eyeMask = 1.0 - smoothstep(0.96, 1.04, eyeD);
+  vec3 eyeN = N;
+  if (eyeD < 1.0) {
+    // A domed cornea: the normal leans out towards the rim.
+    vec2 e = vec2(arcMm - EYE.x, height - EYE.y) / EYE.z;
+    vec3 Ea, Eh;
+    surfaceFrame(N0, vec2(arcMm, height), Ea, Eh);
+    eyeN = normalize(N0 * sqrt(max(0.0, 1.0 - dot(e, e) * 0.6)) + (Ea * e.x + Eh * e.y) * 0.55);
+  }
+
+  float NdotV = max(dot(N, V), 1e-4);
+  float NdotL = max(dot(N, L), 0.0);
+  vec3 H = normalize(V + L);
+  float NdotH = max(dot(N, H), 0.0);
 
   // --- Thin-film iridescence ---
-  float thickness = uFilmThickness + scaleJitter * 90.0
+  float thickness = uFilmThickness + scaleJitter * 25.0 * scaleVis
     + 40.0 * sin(along * 9.0 + uTime * 0.05);
   vec3 iridescence = thinFilm(NdotV, thickness);
 
@@ -327,16 +409,34 @@ void main() {
   // Darker along the back, paler on the belly. Countershading is nearly
   // universal in fish and its absence is immediately readable, even to someone
   // who has never thought about why.
-  float ventral = smoothstep(-0.2, 0.9, -N.y);
+  float ventral = smoothstep(-0.2, 0.9, -N0.y);
+  float dorsal = smoothstep(0.3, 1.0, N0.y);
   vec3 albedo = mix(uBaseColour, uBellyColour, ventral * 0.75);
-  albedo *= 1.0 - scaleEdge * 0.25;
-  // The head is less iridescent than the flank, as it is on the real animal.
-  float irisMask = smoothstep(0.05, 0.35, along) * (1.0 - scaleEdge * 0.5);
+  albedo *= 1.0 - dorsal * 0.35;
+  // The head is a shade darker than the flank.
+  albedo *= mix(0.88, 1.0, smoothstep(GILL_ARC - 6.0, GILL_ARC + 4.0, arcMm));
+  albedo *= 1.0 - (rimShadow * 0.22 + (1.0 - exposed) * 0.08) * scaleVis;
+
+  // The gill cover's edge: a curve that sweeps back above and below the
+  // middle, drawn as the shadow under the lip of the flap.
+  float gillEdge = GILL_ARC + 0.05 * height * height;
+  float gill = (1.0 - smoothstep(0.0, 0.28, abs(arcMm - gillEdge - 0.15)))
+             * (1.0 - smoothstep(3.2, 4.4, abs(height)));
+  albedo *= 1.0 - gill * 0.45;
+
+  // The mouth: a short upturned gape at the tip of the snout.
+  float mouthLine = abs(height - (1.05 - 0.4 * arcMm));
+  float mouth = (1.0 - smoothstep(0.05, 0.16, mouthLine)) * (1.0 - smoothstep(1.1, 1.5, arcMm));
+  albedo *= 1.0 - mouth * 0.7;
+
+  // The head is less iridescent than the flank, as it is on the real animal,
+  // and the scales flash individually, strongest at their rims.
+  float irisMask = mix(0.45, 1.0, smoothstep(0.08, 0.3, along)) * (0.7 + 0.3 * scaleVis * (exposed + 0.5 * scaleJitter - rimShadow));
 
   // --- Direct lighting ---
   float D = distributionGGX(NdotH, uRoughness);
   float G = geometrySmith(NdotV, NdotL, uRoughness);
-  vec3 F = fresnelSchlick3(max(dot(normalize(V + L), V), 0.0), vec3(0.04));
+  vec3 F = fresnelSchlick3(max(dot(H, V), 0.0), vec3(0.04));
   vec3 specular = (D * G * F) / max(1e-4, 4.0 * NdotV * NdotL + 1e-4);
 
   // --- Caustics ---
@@ -351,18 +451,18 @@ void main() {
   float depthBelow = max(0.0, uWaterY - vWorldPos.y);
   // Only lit surfaces catch it, and less so the deeper they are.
   float causticMod = causticLight(texture(uCaustics, cuv).r,
-                                  0.85 * smoothstep(-0.1, 0.4, N.y) * exp(-depthBelow * 1.5));
+                                  0.85 * smoothstep(-0.1, 0.4, N0.y) * exp(-depthBelow * 1.5));
 
   vec3 lit = uLightColour * causticMod * NdotL;
   vec3 colour = albedo * (lit + uAmbient);
-  colour += specular * lit * 1.2;
+  colour += specular * lit;
   // Iridescence is a reflection off the guanine platelets, so it lives near
   // the specular direction and at grazing angles, not spread evenly over the
-  // flank as a diffuse glow. Weighted evenly it washed the whole fish to a
-  // pinkish white; the pigment never showed through.
-  float irisView = 0.05 + 0.95 * pow(1.0 - NdotV, 3.0);
-  float irisGlint = D * 0.25;
-  colour += iridescence * irisMask * (irisView + irisGlint) * (lit * 0.7 + uAmbient * 0.5);
+  // flank as a diffuse glow. Weighted evenly it washes the whole fish to a
+  // pinkish white and the pigment never shows through.
+  float irisView = 0.02 + 0.45 * pow(1.0 - NdotV, 3.0);
+  float irisGlint = D * 0.2;
+  colour += iridescence * irisMask * (irisView + irisGlint) * (lit * 0.6 + uAmbient * 0.4);
 
   // --- Subsurface ---
   //
@@ -370,13 +470,32 @@ void main() {
   // near the edges; without this the silhouette reads as cut from card.
   float wrap = max(0.0, (dot(N, L) + 0.45) / 1.45);
   float back = pow(max(0.0, dot(V, -L)), 4.0);
-  vec3 sss = vec3(0.95, 0.42, 0.34) * (wrap * 0.30 + back * 0.55);
+  vec3 sss = vec3(0.85, 0.2, 0.16) * (wrap * 0.30 + back * 0.55);
   float thin = 1.0 - smoothstep(0.0, 0.55, NdotV); // grazing angles are thin
-  colour += sss * uLightColour * thin * 0.35;
+  colour += sss * uLightColour * thin * 0.3;
+
+  // --- The eye, over everything else ---
+  if (eyeMask > 0.0) {
+    float eNdotV = max(dot(eyeN, V), 1e-4);
+    float eNdotL = max(dot(eyeN, L), 0.0);
+    // A black pupil filling most of it, a thin ring of dark gold iris, and
+    // a darker rim where it meets the skin.
+    float pupil = 1.0 - smoothstep(0.58, 0.66, eyeD);
+    vec3 iris = mix(vec3(0.07, 0.035, 0.01), vec3(0.02, 0.01, 0.008), smoothstep(0.8, 1.0, eyeD));
+    vec3 eyeAlbedo = mix(iris, vec3(0.0), pupil);
+    vec3 eyeCol = eyeAlbedo * (uLightColour * eNdotL * 0.6 + uAmbient);
+    // The cornea is a clean wet lens: a sharp highlight and a reflection of
+    // the room, both far brighter than the skin's.
+    vec3 eH = normalize(V + L);
+    float eD = distributionGGX(max(dot(eyeN, eH), 0.0), 0.06);
+    float eF = fresnelSchlick(eNdotV, 0.03);
+    eyeCol += uLightColour * eD * 0.02 * eNdotL;
+    eyeCol += envColour(vWorldPos, reflect(-V, eyeN)) * eF * 0.3;
+    colour = mix(colour, eyeCol, eyeMask);
+  }
 
   // The water between the fish and the eye takes some of the light out.
-  float distanceThroughWater = length(vWorldPos - (vWorldPos + vView * 0.0));
-  colour *= transmittance(depthBelow * 0.5 + distanceThroughWater);
+  colour *= transmittance(depthBelow * 0.5);
   colour *= uWaterTint;
 
   fragColour = vec4(tonemap(colour * uExposure), 1.0);
@@ -389,8 +508,16 @@ void main() {
  * A fin is a membrane a tenth of a millimetre thick stretched between rays about
  * three times that. Almost all of what it looks like is transmission, not
  * reflection: it glows when the light is behind it, and the rays show through as
- * darker struts. Shading it as an opaque surface with a colour map is what makes
- * most rendered fish look like toys.
+ * fine darker lines. Shading it as an opaque surface with a colour map is what
+ * makes most rendered fish look like toys.
+ *
+ * The simulated sheet is a rectangle of rays, all the same length, because
+ * that is what the physics needs. The fin's outline is cut from it here: each
+ * fin has its own profile across its rays, and everything outside it fades
+ * out, so the dorsal rises towards the back, the anal fin deepens along the
+ * belly, the tail opens into a rounded veil and the pelvics taper to a point.
+ * The edge is feathered and slightly ragged, since a veiltail's rays run a
+ * little past the webbing between them.
  */
 export const FIN_FRAG = /* glsl */ `#version 300 es
 ${COMMON}
@@ -407,39 +534,86 @@ uniform float uWaterY;
 uniform vec3 uFinColour;
 uniform vec2 uCausticsExtent;
 uniform float uTime;
+// 0 caudal, 1 dorsal, 2 anal, 3 pelvic.
+uniform float uFinShape;
+// How many bony rays to draw across the fin. Unrelated to how many the
+// physics simulates: those are the sheet's grid, these are anatomy.
+uniform float uRayCount;
 
 out vec4 fragColour;
 
+// How far out along its rays the fin reaches, as a fraction of the simulated
+// sheet, at a point \`u\` of the way across it.
+float finReach(float u) {
+  if (uFinShape < 0.5) {
+    // Caudal (u = 0 is the lower edge): a broad rounded veil, fullest a little
+    // below the middle where a long tail hangs.
+    float rounded = pow(sin(PI * clamp(u, 0.0, 1.0)), 0.55);
+    return 0.62 + 0.36 * rounded + 0.05 * (1.0 - u);
+  } else if (uFinShape < 1.5) {
+    // Dorsal (u = 0 at the front): low where it starts and rising to a tall
+    // rounded rear lobe.
+    return 0.3 + 0.7 * sin(0.5 * PI * smoothstep(0.0, 0.8, u)) - 0.1 * smoothstep(0.88, 1.0, u);
+  } else if (uFinShape < 2.5) {
+    // Anal: shallow at the front, deepening steadily towards the tail.
+    return mix(0.38, 0.98, smoothstep(0.0, 0.95, u));
+  }
+  // Pelvic: a long streamer.
+  return 1.0;
+}
+
 void main() {
   if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
-  vec3 N = normalize(vNormal);
-  vec3 V = normalize(vView);
-  vec3 L = normalize(uLightDir);
-
-  // A fin has no front and no back — it is a sheet — so flip the normal to
-  // whichever side is facing us before doing any lighting.
-  if (dot(N, V) < 0.0) N = -N;
-
-  float NdotV = max(dot(N, V), 1e-4);
-  float NdotL = abs(dot(N, L));
 
   float across = vUV.x;     // 0 to 1 across the rays
-  float along = vExtra.x;   // 0 at the body, 1 at the trailing edge
+  float along = vExtra.x;   // 0 at the body, 1 at the end of the simulated rays
   float thicknessMm = vExtra.y;
 
   // --- Rays ---
   //
-  // The bony struts, running out from the body and branching towards the edge as
-  // real ones do.
-  float rayCoord = across * float(${'${RAY_COUNT}'});
-  float rayPhase = fract(rayCoord * (1.0 + step(0.55, along)));
-  float ray = 1.0 - smoothstep(0.06, 0.30, abs(rayPhase - 0.5));
+  // Thin bony lines running out from the body, each forking in two towards
+  // the edge as real fin rays do. Measured in ray spacings; the width is kept
+  // to a few percent of the spacing, which is what they are.
+  float q = across * uRayCount;
+  float f = fract(q) - 0.5;
+  float fork = 0.2 * smoothstep(0.3, 0.9, along);
+  float d = min(abs(f - fork), abs(f + fork));
+  float aa = fwidth(q) * 0.75 + 1e-4;
+  float rayWidth = mix(0.05, 0.025, along);
+  float ray = 1.0 - smoothstep(rayWidth, rayWidth + aa, d);
+  // When the rays get finer than the pixels, fade them out rather than let
+  // them alias into stripes.
+  ray *= 1.0 - smoothstep(0.25, 0.6, fwidth(q));
+
+  // --- Outline ---
+  float reach = finReach(across);
+  // Ray tips run slightly beyond the webbing, giving a finely scalloped edge,
+  // and the edge wanders a little so it is not ruled.
+  float tip = pow(1.0 - clamp(2.0 * abs(f), 0.0, 1.0), 3.0);
+  reach += 0.035 * tip + 0.05 * (noise2(vec2(across * 5.0, 1.7 * uFinShape)) - 0.5);
+  if (uFinShape > 2.5) {
+    // Pelvic streamers taper to a point.
+    float halfWidth = 0.5 * pow(max(0.0, 1.0 - along), 0.7);
+    if (abs(across - 0.5) > halfWidth) discard;
+  }
+  float edge = along / max(0.05, reach);
+  if (edge > 1.0) discard;
+  float feather = 1.0 - smoothstep(0.86, 1.0, edge);
+
+  vec3 N = normalize(vNormal);
+  vec3 V = normalize(vView);
+  vec3 L = normalize(uLightDir);
+  // A fin has no front and no back — it is a sheet — so flip the normal to
+  // whichever side is facing us before doing any lighting.
+  if (dot(N, V) < 0.0) N = -N;
+  float NdotV = max(dot(N, V), 1e-4);
+  float NdotL = abs(dot(N, L));
 
   // --- Transmission ---
   //
   // Beer-Lambert through the membrane. It is thin enough that most light gets
-  // through, and the rays are the parts that stop it.
-  float thickness = thicknessMm * (1.0 + ray * 2.2);
+  // through; the rays, and the membrane seen edge-on in a fold, stop more.
+  float thickness = thicknessMm * (1.0 + ray * 1.5);
   float sigma = 2.2;  // per millimetre
   float through = exp(-sigma * thickness / max(0.15, NdotV));
   // Strongest when looking towards the light through the fin.
@@ -447,12 +621,14 @@ void main() {
 
   // --- Colour ---
   //
-  // Betta fin membrane is a saturated wash that deepens towards the edge, with
-  // the iridescent sheen concentrated near the body where the scales reach onto
-  // the fin base.
-  vec3 tint = uFinColour * (0.55 + 0.45 * smoothstep(0.0, 0.8, along));
-  vec3 iridescence = thinFilm(NdotV, uFilmThickness * 0.8 + 60.0 * sin(across * 18.0 + uTime * 0.03));
-  float sheen = (1.0 - smoothstep(0.05, 0.5, along)) * 0.5;
+  // A saturated wash, deepest near the body and thinning towards the edge,
+  // with the rays a darker red and the iridescence of the body's scales
+  // reaching a little way onto the fin base.
+  vec3 tint = uFinColour * mix(0.8, 1.15, smoothstep(0.0, 0.9, edge));
+  tint = mix(tint, uFinColour * vec3(0.6, 0.4, 0.45), ray * 0.4);
+  float filmVar = noise2(vec2(across * 3.0, along * 4.0) + uTime * 0.01) - 0.5;
+  vec3 iridescence = thinFilm(NdotV, uFilmThickness * 0.8 + 70.0 * filmVar);
+  float sheen = (1.0 - smoothstep(0.0, 0.4, edge)) * 0.25;
 
   vec2 cuv = vec2(
     (vWorldPos.x + uCausticsExtent.x) / (2.0 * uCausticsExtent.x),
@@ -460,22 +636,26 @@ void main() {
   );
   float depthBelow = max(0.0, uWaterY - vWorldPos.y);
   vec3 lit = uLightColour * causticLight(texture(uCaustics, cuv).r, 0.75 * exp(-depthBelow * 1.5));
-  vec3 colour = tint * (NdotL * lit * 0.55 + uAmbient);
-  colour += tint * through * (backlight * 2.6 + 0.35) * lit;
+  vec3 colour = tint * (NdotL * lit * 0.5 + uAmbient);
+  colour += tint * through * (backlight * 2.6 + 0.3) * lit;
   colour += iridescence * sheen * (lit * 0.4 + uAmbient);
-  colour *= 1.0 - ray * 0.35;
+  // A soft sheen off the folds of the membrane: wet tissue is glossy.
+  vec3 H = normalize(V + L);
+  colour += vec3(0.9, 0.85, 0.8) * pow(max(dot(N, H), 0.0), 60.0) * 0.18 * lit;
 
   colour *= transmittance(depthBelow * 0.5);
   colour *= uWaterTint;
 
-  // A fin is genuinely see-through, and how much depends on the angle and on
-  // whether we are looking at membrane or at a ray.
-  float alpha = clamp(0.30 + 0.55 * (1.0 - through) + ray * 0.35, 0.0, 1.0);
-  alpha *= mix(1.0, 0.75, smoothstep(0.5, 1.0, along));
+  // A fin is genuinely see-through, and more so towards its edge. Seen
+  // edge-on in a fold the light crosses more membrane, so it thickens there.
+  float alpha = mix(0.62, 0.28, smoothstep(0.0, 1.0, edge));
+  alpha += 0.45 * (1.0 - through) + ray * 0.15;
+  alpha = clamp(alpha, 0.0, 0.92) * feather;
+  if (alpha < 0.004) discard;
 
   fragColour = vec4(tonemap(colour * uExposure), alpha);
 }
-`.replace('${RAY_COUNT}', '9');
+`;
 
 /** Substrate, walls, plants. `aExtra.x` selects which. */
 export const TANK_FRAG = /* glsl */ `#version 300 es
