@@ -10,7 +10,7 @@ docs/SIMULATION-SPEC.md          the numerical contract both ports implement
 preview/                         desktop: TypeScript + WebGL2
   src/sim/                       the simulation
   src/render/                    a preview renderer
-  src/test/                      55 tests, run with `npm test`
+  src/test/                      56 tests, run with `npm test`
 
 ios/Aquarium/                    phone: Swift + Metal + ARKit
   Sources/Sim/                   the same simulation, ported
@@ -207,7 +207,7 @@ knock through its lateral line.
 
 ## Testing
 
-`preview/src/test/` holds 55 tests in five files:
+`preview/src/test/` holds 56 tests in five files:
 
 - `physics.test.js` — conservation, stability, the water's sloshing period against
   the analytic result, pellet terminal velocity against Schiller-Naumann.
