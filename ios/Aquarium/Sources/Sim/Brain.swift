@@ -638,8 +638,14 @@ final class FishBrain {
 
     private func runStrike(_ loco: FishLocomotion, _ dt: Double) {
         guard let food = percepts.nearestFood else { return }
-        // Steer so the *mouth* arrives at the pellet, not the centre of mass.
-        goal.target = food.position + loco.position - mouth
+        // Head straight for the pellet. The mouth is on the fish's centreline,
+        // ahead of the centre of mass, so pointing the body at the pellet is what
+        // brings the mouth onto it. Aiming the centre of mass at the pellet
+        // shifted back by the mouth's offset (the old way) is how you would move
+        // a point, but a fish turns rather than sliding sideways: with the pellet
+        // a few millimetres beside the snout, a ten-degree correction read as a
+        // ninety-degree turn, and the fish pivoted instead of closing in.
+        goal.target = food.position
         let d = percepts.foodDistance
 
         // Slow down as it closes, rather than switching between two speeds.
