@@ -18,7 +18,16 @@ import { clamp, Vec3 } from './math.js';
  * so the same factor is kept and they disturb the water exactly as much as
  * before.
  */
-const IMPULSE_SECONDS = 0.0025;
+export const IMPULSE_SECONDS = 0.0025;
+
+/** How many recent disturbances the surface remembers for the renderer. */
+export const TOUCH_LOG = 4096;
+/** Numbers per disturbance in the log: x, z, amount, radius, time, kind. */
+export const TOUCH_FIELDS = 6;
+/** A push: `amount` sets surface speed, as disturb() takes it. */
+export const TOUCH_PUSH = 0;
+/** A displacement: `amount` is a volume of water moved, m^3. */
+export const TOUCH_LIFT = 1;
 
 /**
  * The water surface.
@@ -106,6 +115,9 @@ export class WaterSurface {
   /** Nodal impulses gathered from disturb() since the last step. */
   private readonly force: Float32Array;
   private forcePending = false;
+  /** Nodal height changes gathered from displace() since the last step. */
+  private readonly lift: Float32Array;
+  private liftPending = false;
   /** Modal accelerations for a unit push at each outlet patch, and for a tilt. */
   private readonly outletShapes: Float64Array[] = [];
   private readonly outletNoise: { y: number; v: number }[] = [];
@@ -117,6 +129,17 @@ export class WaterSurface {
 
   private accumulator = 0;
   private timeAccum = 0;
+
+  /**
+   * Every disturbance, as (x, z, strength, radius, time, kind), in a ring of the most
+   * recent TOUCH_LOG entries; `touchCount` counts all of them ever made. The
+   * renderer replays them into a much finer ripple layer (see
+   * render/ripples.ts), because this grid, at 4.4 mm between nodes, cannot
+   * hold the centimetre rings a touch sends out, and those rings are what
+   * throw the light on the sand. Nothing in the simulation reads it.
+   */
+  readonly touchLog = new Float64Array(TOUCH_LOG * TOUCH_FIELDS);
+  touchCount = 0;
 
   /** Linear acceleration of the tank in world space, gravity already removed. */
   private accelX = 0;
@@ -140,6 +163,7 @@ export class WaterSurface {
     this.n = new Float32Array(count * 3);
     for (let k = 0; k < count; k++) this.n[k * 3 + 1] = 1;
     this.force = new Float32Array(count);
+    this.lift = new Float32Array(count);
     this.amp = new Float64Array(count);
     this.rate = new Float64Array(count);
     this.omega2 = new Float64Array(count);
@@ -373,6 +397,7 @@ export class WaterSurface {
    * IMPULSE_SECONDS for its scale.
    */
   disturb(x: number, z: number, strength: number, radius: number): void {
+    this.logTouch(x, z, strength, radius, TOUCH_PUSH);
     const r2 = radius * radius;
     const ixC = (x - TANK_MIN_X) / this.dx;
     const izC = (z - TANK_MIN_Z) / this.dz;
@@ -398,6 +423,42 @@ export class WaterSurface {
   }
 
   /**
+   * Move a volume of water at once: positive raises the surface, negative
+   * leaves a hollow. For something that pushes the water aside rather than
+   * setting it moving — a snout leaving the surface leaves a hollow where it
+   * was, which fills in and sends out a ring. `volume` in cubic metres, spread
+   * as the same bell shape disturb() uses.
+   */
+  displace(x: number, z: number, volume: number, radius: number): void {
+    this.logTouch(x, z, volume, radius, TOUCH_LIFT);
+    // The bell exp(-3 d^2 / r^2) holds pi r^2 / 3 of area under unit height.
+    const peak = volume / ((Math.PI * radius * radius) / 3);
+    const r2 = radius * radius;
+    for (let j = 0; j < this.nz; j++) {
+      const wz = this.worldZ(j) - z;
+      if (wz * wz > r2) continue;
+      for (let i = 0; i < this.nx; i++) {
+        const wx = this.worldX(i) - x;
+        const d2 = wx * wx + wz * wz;
+        if (d2 > r2) continue;
+        this.lift[this.index(i, j)] += peak * Math.exp(-3 * (d2 / r2));
+        this.liftPending = true;
+      }
+    }
+  }
+
+  private logTouch(x: number, z: number, amount: number, radius: number, kind: number): void {
+    const o = (this.touchCount % TOUCH_LOG) * TOUCH_FIELDS;
+    this.touchLog[o] = x;
+    this.touchLog[o + 1] = z;
+    this.touchLog[o + 2] = amount;
+    this.touchLog[o + 3] = radius;
+    this.touchLog[o + 4] = this.timeAccum;
+    this.touchLog[o + 5] = kind;
+    this.touchCount++;
+  }
+
+  /**
    * Advance the surface. Accumulates real time and runs fixed steps, so the
    * water behaves identically at 30 and 120 fps.
    */
@@ -410,6 +471,7 @@ export class WaterSurface {
       // (a very short dt) they are kept for the next one rather than dropped —
       // losing a pellet's splash because the frame was quick would be a bug.
       if (this.forcePending) this.applyImpulses();
+      if (this.liftPending) this.applyLift();
       this.substep(WATER.dt);
       this.accumulator -= WATER.dt;
       steps++;
@@ -423,6 +485,15 @@ export class WaterSurface {
       this.heightsStale = true;
       this.slopesStale = true;
     }
+  }
+
+  private applyLift(): void {
+    const modal = this.rowsB;
+    this.project(this.lift, modal);
+    // Mode 0 is the mean level; moving water about does not change it.
+    for (let k = 1; k < modal.length; k++) this.amp[k] += modal[k];
+    this.lift.fill(0);
+    this.liftPending = false;
   }
 
   private applyImpulses(): void {

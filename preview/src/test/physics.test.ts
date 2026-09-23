@@ -104,13 +104,12 @@ test('a disturbance dies away rather than ringing forever', () => {
   assert.ok(late < early * 0.2, `ripples barely decayed: ${early.toExponential(2)} -> ${late.toExponential(2)}`);
 });
 
-test('the filter keeps the surface moving by about a millimetre, and no more', () => {
-  // The tank is never still: the filter's return stream and the current it
-  // drives keep small ripples going everywhere, and those ripples are most of
-  // what makes the water visible. The sources are continuous, so two things
-  // have to be true: the surface must settle at around a millimetre of
-  // movement rather than growing, and nothing may go non-finite over a long
-  // run with them on.
+test('the filter keeps the surface moving a little, and no more', () => {
+  // The tank is never quite still: the filter's return stream and the current
+  // it drives keep small ripples going. The sources are continuous, so two
+  // things have to be true: the surface must settle at a fraction of a
+  // millimetre of movement rather than growing, and nothing may go non-finite
+  // over a long run with them on.
   const water = new WaterSurface();
   let peak = 0;
   let sumSq = 0;
@@ -128,8 +127,8 @@ test('the filter keeps the surface moving by about a millimetre, and no more', (
     }
   }
   const rms = Math.sqrt(sumSq / count);
-  assert.ok(rms > 0.0002, `the filter barely moved the surface: ${(rms * 1000).toFixed(2)} mm rms`);
-  assert.ok(rms < 0.002, `the surface moves ${(rms * 1000).toFixed(2)} mm rms; a gentle filter makes about one`);
+  assert.ok(rms > 0.00005, `the filter barely moved the surface: ${(rms * 1000).toFixed(3)} mm rms`);
+  assert.ok(rms < 0.002, `the surface moves ${(rms * 1000).toFixed(2)} mm rms; a gentle filter makes a fraction of one`);
   assert.ok(peak < 0.01, `the surface peaked at ${(peak * 1000).toFixed(2)} mm`);
 });
 

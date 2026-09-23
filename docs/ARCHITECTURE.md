@@ -110,7 +110,10 @@ lit by the same caustics and shadows.
 
 The preview's water surface (`preview/src/sim/water.ts`) is also solved
 differently from the phone's: as the tank's standing waves, each advanced
-exactly, rather than as a wave equation on a grid. See spec §3.1.
+exactly, rather than as a wave equation on a grid. See spec §3.1. On top of it,
+`render/ripples.ts` runs a much finer ripple layer on the graphics card for the
+rings touches send out, replayed from a log the surface keeps; it is drawn,
+not simulated against.
 
 **Why the volume pass sits where it does.** It has to come after the scene and
 before the surface, because the absorption applies to light travelling from the

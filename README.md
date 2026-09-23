@@ -49,10 +49,11 @@ The same applies to the rest of it:
   actual simulated surface, so when you tilt the phone and the water sloshes, the
   light on the floor sloshes with it. In the desktop preview the surface is
   solved as the tank's own standing waves, each ringing at the speed real water
-  gives a wave of its length, so the centimetre-scale ripples that draw the
-  bright network of lines are part of the simulation too: they spread from the
-  filter outlet, cross each other, reflect off the glass and die away as real
-  ones do, and the light follows them.
+  gives a wave of its length. At rest it is nearly still, as a real tank is
+  away from the filter, and the light on the sand barely moves. When something
+  touches the water — the fish coming up for air, a bubble — a fine ripple
+  layer on the graphics card carries the centimetre rings it sends out, and
+  they throw rings of light across the sand.
 - Fine specks drift in the desktop preview's water, carried by the current and
   settling slowly. They are nearly invisible until the lamp catches them.
 - In the desktop preview, the fish, its fins and the plants **cast shadows**

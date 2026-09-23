@@ -316,6 +316,16 @@ export const WATER = {
   /** Fish coupling: how close to the surface a body segment has to be to disturb it. */
   fishCouplingRange: 0.020,
   fishCouplingGain: 0.35,
+  /**
+   * The hollow a gulp leaves, m^3. The snout, about 4 mm across and 4 mm
+   * deep at the tip, comes up about 3 mm through the surface to take air and
+   * draws the water up round it; when it drops away the water there falls
+   * back, and the ring that sends out is the one visible sign on the sand
+   * that the fish has come up for air. An estimate from the fish's size, not
+   * a measurement.
+   */
+  gulpVolume: 5e-8,
+  gulpRadius: 0.004,
   /** Pellet impact: fraction of impact speed injected into the surface velocity. */
   pelletImpactGain: 0.05,
   pelletImpactRadius: 0.004,
@@ -346,21 +356,19 @@ export const WATER = {
   outletRadius: 0.025,
   /**
    * The rest of the surface. The outlet's current spreads across the whole
-   * tank, and the eddies it carries keep the surface gently rippled
+   * tank, and the eddies it carries keep the surface faintly moving
    * everywhere, not only near the outlet. Given as the ripples that result:
-   * an rms slope (a flat surface is 0; at 0.1 the surface rises and falls by
-   * about a millimetre), spread log-normally about a wavelength.
+   * an rms slope (a flat surface is 0), spread log-normally about a
+   * wavelength.
    *
-   * The wavelength is a choice between calm and crisp. Light on the sand
-   * comes to sharp bright lines only where ripples are short enough to focus
-   * it within the water's depth, which here means about a centimetre; ripples
-   * that short rise and fall fifteen to thirty times a second, and the light
-   * they throw reads as flicker. Five-centimetre ripples rise and fall about six times a second
-   * and give a softer, slower, dappled pattern. Measured on the sand: each spot
-   * goes bright-dark-bright about 7 times a second with these settings, against
-   * about 21 with the fixed ripple waves this replaced.
+   * Kept very small. Looking into a real planted tank, the surface away from
+   * the filter is close to still and the light on the sand barely moves;
+   * what makes it dance is something touching the water — the fish coming up
+   * for air, a bubble, the outlet. At 0.015 the light on the sand varies by
+   * about 6% at rest (0.10, tried first, gave 33%, which read as a sea). The
+   * touches draw their rings through the fine ripple layer (render/ripples.ts).
    */
-  agitation: { slopeRms: 0.10, wavelength: 0.05, spread: 0.35 },
+  agitation: { slopeRms: 0.015, wavelength: 0.05, spread: 0.35 },
   outletPatches: 6,
   outletPatchRadius: 0.007,
   outletHz: 6.0,

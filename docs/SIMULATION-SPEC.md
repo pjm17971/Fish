@@ -255,7 +255,7 @@ acceleration `a` settles the surface to slope `-a / g` (test).
 **Agitation** (desktop preview). Every mode also gets a random velocity kick
 each step, `q sqrt(dt) N(0, 1)`, with `q` chosen so its steady variance
 `q^2 / (4 Gamma omega^2)` follows a log-normal slope spectrum: rms slope
-`0.10`, centred on `5 cm`, log-width `0.35` (per step of `ln k`: each mode's
+`0.015`, centred on `5 cm`, log-width `0.35` (per step of `ln k`: each mode's
 height weight is the target divided by `k^4`, for the `k^2` growth in the number
 of modes and the `k^2` more slope per unit height). This stands in for the eddies
 the filter current carries across the whole surface. Off when the outlet is off.
@@ -324,9 +324,12 @@ finite over a long run.
 
 *Desktop preview:* six patches `7 mm` across within `25 mm` of the outlet, each
 pushed by its own band-limited noise (a resonator at `6 Hz`, `Q = 1.5`, the
-frequency of a 5 cm ripple), push `1.6 m/s^2`. With the agitation, the whole
-surface moves by about `0.9 mm` rms; test: rms between 0.2 and 2 mm, peak under
-1 cm, finite over a long run.
+frequency of a 5 cm ripple), push `1.6 m/s^2`. Test: rms height between 0.05
+and 2 mm (measured 0.22), peak under 1 cm, finite over a long run.
+
+*Desktop preview:* a gulp also leaves a hollow of `50 mm^3` (`WATER.gulpVolume`,
+radius `4 mm`) at the snout, applied as a change of height rather than speed
+(`WaterSurface.displace`).
 
 ## 4. Fish locomotion
 
@@ -864,8 +867,18 @@ rather than points, drawn into a `1024 x 1024` map, each triangle carrying its
 exact area ratio (so a flat surface reads exactly 1.0 and needs no calibration).
 The surface they refract through is the simulated one alone (the modal solver,
 §3.1), read with a smooth bicubic interpolation of its height and exact slopes
-so the curvature has no kinks at grid nodes. The map is blurred by the lamp's
-angular radius (`0.02 rad`) over the water depth.
+so the curvature has no kinks at grid nodes, plus the fine ripple layer. The
+map is blurred by the lamp's angular radius (`0.02 rad`) over the water depth.
+
+**Fine ripples** (desktop preview, not yet ported). A `256 x 183` grid (1.37 mm)
+on the graphics card, `d2u/dt2 = c^2 lap(u) + nu lap(du/dt) - 0.225 du/dt` with
+`c = 0.24 m/s` (the speed of 1 to 3 cm capillary-gravity ripples),
+`nu = 1.8e-5 m^2/s` (so `nu k^2 / 2` matches the film damping at 2 cm), step
+`1/480 s`, reflecting walls. Every `disturb()` and `displace()` of the coarse
+surface is logged and replayed here as its Gaussian less a wider one of equal
+volume (width added in quadrature: the coarse grid's `4.4 mm`), so the coarse
+and fine layers do not count the same water twice. Drawing only: the caustic
+rays and the surface normal add its slopes; nothing in the simulation reads it.
 
 **Specks** (desktop preview, not yet ported). 900 particles, radius `0.03` to
 `0.22 mm` drawn log-uniformly, excess density `25 kg/m^3` (Stokes settling

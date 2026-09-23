@@ -64,6 +64,7 @@ import {
 } from './meshes.js';
 import { World } from '../sim/world.js';
 import { Particulate, PARTICULATE_FLOATS } from './particulate.js';
+import { RippleLayer } from './ripples.js';
 import { OPTICS, TANK, TANK_MIN_Z, WATER_DEPTH } from '../sim/config.js';
 import {
   Mat4,
@@ -177,6 +178,7 @@ export class Renderer {
   private readonly quadGpu: Mesh;
   private readonly causticsGrid: Mesh;
   private readonly motesGpu: Mesh;
+  private readonly ripples: RippleLayer;
   private readonly particulate = new Particulate();
   private lastTime = -1;
 
@@ -304,6 +306,7 @@ export class Renderer {
 
     this.quadGpu = new Mesh(gl, this.blurProgram, [{ name: 'aPosition', size: 2, offset: 0 }], 8);
     this.quadGpu.setVertices(new Float32Array([-1, -1, 3, -1, -1, 3]));
+    this.ripples = new RippleLayer(gl, world.water, this.quadGpu);
 
     // Caustics: a mesh of rays over the surface, a little wider than it.
     const grid = new Float32Array((CAUSTIC_GRID_X + 1) * (CAUSTIC_GRID_Z + 1) * 2);
@@ -607,6 +610,9 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.heightTexture);
     gl.uniform1i(u.uHeightMap!, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.ripples.texture);
+    gl.uniform1i(u.uRipples!, 1);
     gl.uniform2f(u.uTankExtent!, TANK.width / 2, TANK.depth);
     gl.uniform1f(u.uWaterY!, TANK.waterY);
     gl.uniform1f(u.uFloorY!, TANK.floorY);
@@ -947,6 +953,9 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D, this.reflectionTarget.texture);
     if (u.uReflection) gl.uniform1i(u.uReflection, 2);
     if (u.uViewport) gl.uniform2f(u.uViewport, this.width, this.height);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_2D, this.ripples.texture);
+    if (u.uRipples) gl.uniform1i(u.uRipples, 6);
     // The surface itself is where it is; only what is seen through it shifts.
     if (u.uRefractIOR) gl.uniform1f(u.uRefractIOR, 1);
     this.waterGpu.draw();
@@ -976,6 +985,7 @@ export class Renderer {
     this.lastTime = time;
     this.particulate.step(this.world.flow, dt);
     this.updateDynamicMeshes();
+    this.ripples.update();
     this.renderCaustics();
     this.renderShadows();
     this.renderReflection(time);

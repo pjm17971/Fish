@@ -332,18 +332,30 @@ by the organic film on every aquarium's surface, at about `k sqrt(nu omega / 8)`
 (Lamb 1932; Miles 1967), which is what stops a tank glittering all over. The
 filter's return stream keeps the surface moving: a few patches at the outlet
 pushed by band-limited noise, and small random pushes to every mode across the
-surface standing in for the eddies the current carries, sized to give an rms
-slope of 0.10 centred on 5 cm ripples. Nothing is added to the surface after
-that; the caustics come from the simulated ripples alone.
+surface standing in for the eddies the current carries. Nothing is added to
+the surface after that; the caustics come from the simulated ripples alone.
 
-The ripple length is a trade between calm and crisp. Sharp bright lines on the
-sand need ripples short enough to bring light to a focus within the 8.5 cm of
-water, about a centimetre at these slopes (a gentle ripple focuses light at
-roughly `4 / (slope * k)` below it), and those rise and fall fifteen to thirty
-times a second. Five-centimetre ripples give a softer, slower dappling.
-Measured on the rendered caustic map, each spot of sand goes bright-dark-bright
-about 7 times a second with these settings, against about 21 with the fixed
-waves below.
+How much the surface moves at rest is the main choice. Looking at a real
+planted tank, the surface away from the filter is nearly still and the light on
+the sand barely moves; it dances only where something touches the water. So
+the resting agitation is small (rms slope 0.015 centred on 5 cm, which leaves
+the light on the sand varying by about 6%). Sharp bright lines need ripples
+short enough to bring light to a focus within the 8.5 cm of water, about a
+centimetre (a gentle ripple focuses light at roughly `4 / (slope * k)` below
+it), and ripples that short, kept going everywhere, rise and fall fifteen to
+thirty times a second, which reads as flicker.
+
+The rings a touch sends out are those centimetre ripples, and the 4.4 mm grid
+cannot hold them: a grid needs several points per wavelength. The desktop
+preview therefore also runs a fine ripple layer on the graphics card, on a 1.4
+mm grid, as Evan Wallace's WebGL water demo does. It is a plain wave equation,
+one speed for every wave, which for these ripples is accurate rather than a
+shortcut: capillary-gravity ripples from one to three centimetres long all
+travel at 23 to 25 cm/s. Every disturbance of the coarse surface is replayed
+into it, less the broad part the coarse grid already carries, and its damping
+matches the surface film's. A gulp of air leaves a hollow of about 50 mm^3 (the
+snout, about 4 mm across, comes about 3 mm through the surface; an estimate),
+which fills in and sends a ring of light across the sand.
 
 An earlier version added twelve fixed travelling waves, down to 9 mm long, on
 top of the grid simulation. That looked too flickery: the curvature a wave adds

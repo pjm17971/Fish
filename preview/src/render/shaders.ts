@@ -824,6 +824,7 @@ ${SURFACE_SAMPLE}
 in vec2 aGrid;                 // position across the water surface, 0..1 (a little beyond at the edges)
 
 uniform sampler2D uHeightMap;  // rgb = simulated height, dh/dx, dh/dz at each grid node
+uniform sampler2D uRipples;    // the fine ripples from touches: height (mm), dh/dx, dh/dz
 uniform vec2 uTankExtent;      // half-width, depth
 uniform float uWaterY;
 uniform float uFloorY;
@@ -845,7 +846,12 @@ void main() {
   // surface, so they go straight on.
   vec2 gridSize = vec2(textureSize(uHeightMap, 0));
   bool onSurface = all(greaterThanEqual(aGrid, vec2(0.0))) && all(lessThanEqual(aGrid, vec2(1.0)));
-  vec3 s = onSurface ? surfaceAt(uHeightMap, aGrid * (gridSize - 1.0)) : vec3(0.0);
+  vec3 s = vec3(0.0);
+  if (onSurface) {
+    s = surfaceAt(uHeightMap, aGrid * (gridSize - 1.0));
+    vec3 fine = texture(uRipples, aGrid).rgb;
+    s += vec3(fine.r * 1e-3, fine.g, fine.b);
+  }
   float h = s.x;
   vec3 n = normalize(vec3(-s.y, 1.0, -s.z));
 
@@ -951,14 +957,21 @@ uniform vec2 uViewport;
 uniform float uWaterY;
 uniform vec2 uCausticsExtent;
 uniform float uTime;
+uniform sampler2D uRipples;      // the fine ripples from touches: height (mm), dh/dx, dh/dz
 
 out vec4 fragColour;
 
 void main() {
-  // The simulated surface's own normal. Its ripples are the ones that draw
-  // the caustics on the sand, so the light on the floor belongs to the
-  // surface you are looking at.
+  // The simulated surface's own normal, tipped by the fine ripples. The same
+  // ripples draw the caustics on the sand, so the light on the floor belongs
+  // to the surface you are looking at.
+  vec2 ruv = vec2(
+    (vWorldPos.x + uCausticsExtent.x) / (2.0 * uCausticsExtent.x),
+    (vWorldPos.z + uCausticsExtent.y) / uCausticsExtent.y
+  );
+  vec3 fine = texture(uRipples, ruv).rgb;
   vec3 N = normalize(vNormal);
+  N = normalize(N + vec3(-fine.g, 0.0, -fine.b) * sign(N.y));
   vec3 V = normalize(vView);
   bool fromBelow = dot(N, V) < 0.0;
   if (fromBelow) N = -N;
@@ -1323,5 +1336,75 @@ void main() {
     ? smoothstep(1.0, 0.8, sqrt(r2))
     : min(1.0, vCover * exp(-4.5 * r2) / 0.1736);
   fragColour = vec4(tonemap(radiance * uExposure), alpha);
+}
+`;
+
+/**
+ * One step of the fine ripple layer (see render/ripples.ts): the wave
+ * equation, with the damping of the surface film, on a grid whose edges are
+ * the glass. Reading past the edge returns the edge itself, which is what a
+ * wall that reflects waves amounts to.
+ */
+export const RIPPLE_STEP_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+precision highp sampler2D;
+
+uniform sampler2D uState;     // r: height, mm; g: its rate of change, mm/s
+uniform vec2 uCell;           // metres between grid points, x and z
+uniform vec2 uOrigin;         // world x, z of the grid's corner
+uniform float uDt;
+uniform float uSpeed2;
+uniform float uViscosity;
+uniform float uDecay;
+uniform int uTouchCount;
+uniform vec4 uTouchA[16];     // x, z, surface speed given at the centre (mm/s), 1 / (2 sigma^2)
+uniform vec4 uTouchB[16];     // 1 / (2 w^2) of the wider part, its relative height, 1 if a displacement
+
+out vec4 state;
+
+vec2 at(ivec2 p) {
+  p = clamp(p, ivec2(0), textureSize(uState, 0) - 1);
+  return texelFetch(uState, p, 0).rg;
+}
+
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec2 c = at(p);
+  vec2 lap = (at(p - ivec2(1, 0)) + at(p + ivec2(1, 0)) - 2.0 * c) / (uCell.x * uCell.x)
+           + (at(p - ivec2(0, 1)) + at(p + ivec2(0, 1)) - 2.0 * c) / (uCell.y * uCell.y);
+  float v = c.g + uDt * (uSpeed2 * lap.r + uViscosity * lap.g - uDecay * c.g);
+
+  vec2 pos = uOrigin + (vec2(p) + 0.5) * uCell;
+  float lift = 0.0;
+  for (int i = 0; i < 16; i++) {
+    if (i >= uTouchCount) break;
+    vec2 d = pos - uTouchA[i].xy;
+    float d2 = dot(d, d);
+    float shape = uTouchA[i].z * (exp(-d2 * uTouchA[i].w) - uTouchB[i].y * exp(-d2 * uTouchB[i].x));
+    if (uTouchB[i].z > 0.5) lift += shape; else v += shape;
+  }
+
+  state = vec4(c.r + uDt * v + lift, v, 0.0, 1.0);
+}
+`;
+
+/** The ripple layer's height and slopes, for the shaders that draw with it. */
+export const RIPPLE_RESOLVE_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uState;
+uniform vec2 uCell;
+out vec4 result;
+float h(ivec2 p) {
+  p = clamp(p, ivec2(0), textureSize(uState, 0) - 1);
+  return texelFetch(uState, p, 0).r;
+}
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  // Heights are in millimetres, so the slopes come out a thousand times too
+  // big in metres per metre.
+  float gx = (h(p + ivec2(1, 0)) - h(p - ivec2(1, 0))) / (2.0 * uCell.x) * 1e-3;
+  float gz = (h(p + ivec2(0, 1)) - h(p - ivec2(0, 1))) / (2.0 * uCell.y) * 1e-3;
+  result = vec4(h(p), gx, gz, 1.0);
 }
 `;

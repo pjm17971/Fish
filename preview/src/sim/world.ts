@@ -165,6 +165,8 @@ export class World {
     }
     if (this.brain.gulpedThisTick) {
       this.releaseBubble();
+      this.locomotion.toWorld(this.body.snout(scratch.tmp), scratch.segWorld);
+      this.water.displace(scratch.segWorld.x, scratch.segWorld.z, -WATER.gulpVolume, WATER.gulpRadius);
     }
 
     // 4. Physics. The fish first, so the fins and the water see where it
