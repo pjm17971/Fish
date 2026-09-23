@@ -214,10 +214,15 @@ fish is just a slightly better swimmer than it should be.
 dragging that much fin area genuinely does turn slowly, but this is at the wide
 end of plausible rather than the middle of it.
 
-**Feeding does not always work.** The fish finds and eats the food in most runs
-but not every one. Real fish miss constantly, and the missing is a good part of
-what makes feeding look alive, so this is only partly a defect — but the strike
-geometry is at the edge of reliable and it could be better.
+**Feeding does not always work.** Given three pinches of food half a minute
+apart, the fish eats at least once in about 85 runs in 100 (76 of 90 seeds,
+measured with `preview/tools/probe-feedstats.mjs`). Real fish miss constantly,
+and the missing is a good part of what makes feeding look alive, so this is
+only partly a defect. What is left is mostly reach: the fish rises to floating
+food with its body level rather than tilting its head up, so its mouth usually
+stops seven to nine millimetres under the pellet, right at the edge of the nine
+millimetres the suction strike can cover. A real betta angles up at the
+surface; this one barely pitches at all while it is swimming slowly.
 
 **The scenery is for looking at, not for swimming round.** The desktop preview
 has driftwood, stones, seven kinds of plant and a room around the tank, but the

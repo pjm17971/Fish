@@ -28,6 +28,7 @@ build`. Several of them run a long simulated time and take a minute or two.
 | `probe-fin` / `probe-cloth` | fin shape and its response to being dragged |
 | `probe-water` | surface: sloshing period, decay, stability margins |
 | `probe-feed` / `probe-feedmany` | one feeding attempt, and the success rate over many seeds |
+| `probe-feedstats` | the feeding test's routine (three pinches, thirty seconds apart) over a range of seeds, four at a time: how many runs fed, pellets eaten, and how often the fish was turning on the spot within 2 cm of its food. `node tools/probe-feedstats.mjs 1-90`, about five minutes; `VERBOSE=1` for a line per seed |
 | `probe-close` | close-range strike geometry — mouth position against pellet position |
 | `probe-track` | how well the fish holds a heading it has been given |
 | `probe-brain` | drives and the chosen intention over a long run |

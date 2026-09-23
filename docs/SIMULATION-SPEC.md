@@ -709,7 +709,9 @@ f_pec_right)`.
 - **flare** — hold position facing the rival, `f_pec` up to counteract drift, gill
   covers out over `0.35 s`, all fins to maximum spread, body slowly arcing. Fatigue
   accumulates at `4x` while flaring, so displays self-limit after 20–40 s, as they do.
-- **strikeAtFood** — approach to `0.02 m`, then a suction strike: mouth opens over
+- **strikeAtFood** — approach to `0.02 m` with the body pointed at the pellet (the
+  mouth is on the body's line, so pointing the body is what brings the mouth to the
+  food; a fish cannot slide sideways onto it), then a suction strike: mouth opens over
   `60 ms`, a `0.03 m/s` inflow is added to the pellet's velocity for `80 ms`. If the
   pellet is not in the mouth cone it gets pushed aside instead of eaten, and the fish
   has to try again — which is exactly what real fish do and reads as unmistakably alive.
