@@ -214,7 +214,7 @@ dragging that much fin area genuinely does turn slowly, but this is at the wide
 end of plausible rather than the middle of it.
 
 **Feeding does not always work.** Given three pinches of food half a minute
-apart, the fish eats at least once in about 85 runs in 100 (76 of 90 seeds,
+apart, the fish eats at least once in about 80 runs in 100 (73 of 90 seeds,
 measured with `preview/tools/probe-feedstats.mjs`). Real fish miss constantly,
 and the missing is a good part of what makes feeding look alive, so this is
 only partly a defect. What is left is mostly reach: the fish rises to floating
