@@ -93,7 +93,7 @@ To run the tests:
 
 ```sh
 cd preview
-npm test           # 41 tests
+npm test           # 47 tests
 ```
 
 ---

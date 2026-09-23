@@ -150,6 +150,149 @@ vec3 tonemap(vec3 x) {
 `;
 
 /**
+ * Refraction at the tank's panes: where a point under water *appears* to be.
+ *
+ * Light from a point inside the tank bends where it leaves the water, so the
+ * eye sees the point along a different line from the straight one. That is why
+ * a tank 25 cm deep looks about 19 cm deep from the front, why the fish looks
+ * bigger and nearer than it is, why the back wall swings towards you and the
+ * tank seems to flatten as you walk round it, and why a stem crossing the
+ * waterline looks broken. It is one of the strongest cues that there is water
+ * behind the glass rather than air.
+ *
+ * For each vertex this finds the real path: the point S on the pane where a ray
+ * from the eye, bent by Snell's law, reaches the vertex. The vertex is then
+ * drawn on the straight line from the eye through S, which is where the eye
+ * sees it. Along that line it is placed |P - S| / n beyond the pane, which is
+ * the textbook apparent depth when looking straight in, and which lets the
+ * volume pass recover the true length of the underwater path by multiplying
+ * back by n.
+ *
+ * **One pane per pass.** The eye can see into the water through up to three
+ * panes at once — the front, a side, the top — and near the edge between two
+ * of them the same object is seen through both, in two different places.
+ * That is real: it is why a fish at the corner of a tank shows up twice. So
+ * the scene is drawn once for each pane the eye can see (uPane), with every
+ * vertex bent through that one pane, and each fragment is kept only where its
+ * line of sight really does cross that pane (PANE_CLIP). Choosing a pane per
+ * vertex instead stretches any triangle whose corners choose different panes
+ * across the whole gap between the two images, which was tried first and
+ * smeared the fish into a streak when seen from above. The test is made per
+ * fragment, from its true position, because made per vertex and blended
+ * across each triangle it left gaps and saw-teeth along the tank's edges.
+ * What is not in the water at all is drawn once more, where it is, in a pass
+ * of its own (uPane zero), and that split at the waterline is a real one too.
+ *
+ * The panes are treated as flat: the glass is, and the top is flat until it
+ * ripples, which the surface shader adds on top. The glass itself is a
+ * parallel sheet a few millimetres thick and barely shifts anything, so it is
+ * left out.
+ *
+ * An earlier version shortened the path *along* the straight line of sight,
+ * which moves a point towards the eye without moving it on screen at all.
+ *
+ * render/refraction.ts is the same calculation in TypeScript, which is what the
+ * tests check. Change one, change the other.
+ *
+ * Needs uCameraPos, uWaterMin, uWaterMax and uRefractIOR declared.
+ */
+const APPARENT_POSITION = /* glsl */ `
+// The pane this pass looks through, as its outward normal — one of the six
+// axis directions — or zero in the pass that draws what is out of the water.
+uniform vec3 uPane;
+// How far above the still waterline a point still counts as in the water:
+// 0 for the scene, a ripple's height for the surface mesh.
+uniform float uTopSlack;
+
+// Where p is drawn in this pass. inPane comes back positive where this pass
+// sees p and negative where it does not: where its line of sight crosses the
+// plane of the pane outside the pane's edges, or where p is out of the water
+// (in a pane's pass) or in it (in the pass for what is not).
+vec3 throughPane(vec3 p, out float inPane) {
+  inPane = 1.0;
+  if (uRefractIOR <= 1.0) return p;
+  float n = uRefractIOR;
+  vec3 e = uCameraPos;
+
+  // How far p is outside the water; negative inside. The walls lie exactly on
+  // the sides of the box, so those get a millimetre of grace, and the ripples
+  // in the sand dip a few millimetres below the floor line, so that gets a
+  // centimetre. The top gets the surface's slack.
+  vec3 lo = uWaterMin - vec3(1e-3, 1e-2, 1e-3);
+  vec3 hi = vec3(uWaterMax.x + 1e-3, uWaterMax.y + uTopSlack, uWaterMax.z + 1e-3);
+  vec3 out3 = max(lo - p, p - hi);
+  float dry = max(max(out3.x, out3.y), out3.z);
+  if (dot(uPane, uPane) < 0.5) {
+    inPane = dry;
+    return p;
+  }
+
+  vec3 N = uPane;
+  vec3 onPane = mix(uWaterMin, uWaterMax, step(0.0, N.x + N.y + N.z));
+  float hE = dot(e - onPane, N);              // eye in front of the pane
+  float hP = dot(onPane - p, N);              // point behind it
+
+  vec3 s = p - N * dot(p - onPane, N);        // where the ray crosses the pane
+  vec3 apparent = p;
+  if (hE > 0.0 && hP > 1e-6) {
+    // Distance along the pane between the eye and the point, and the direction.
+    vec3 d = p - e;
+    vec3 lat = d - dot(d, N) * N;
+    float L = length(lat);
+    vec3 u = lat / max(L, 1e-9);
+
+    // Find how far along, x, the ray crosses the pane: Snell's law says
+    //   x / |ES| = n (L - x) / |SP|.
+    // The difference of the two sides rises steadily from x = 0 to x = L, so
+    // there is exactly one crossing. Newton's method, starting from the
+    // small-angle answer and falling back to halving the bracket whenever a
+    // step would leave it. Sixteen steps lands within a micron of the exact
+    // crossing from anywhere the camera can be, including an eye a fraction of
+    // a millimetre off the plane of a pane; eight were out by millimetres there.
+    float xlo = 0.0;
+    float xhi = L;
+    float x = L * hE / (hE + hP / n);
+    for (int i = 0; i < 16; i++) {
+      float a = sqrt(x * x + hE * hE);
+      float b = sqrt((L - x) * (L - x) + hP * hP);
+      float f = x / a - n * (L - x) / b;
+      if (f > 0.0) xhi = x; else xlo = x;
+      float slope = hE * hE / (a * a * a) + n * hP * hP / (b * b * b);
+      float next = x - f / slope;
+      x = (next >= xlo && next <= xhi) ? next : 0.5 * (xlo + xhi);
+    }
+    s = e + u * x - N * hE;
+    apparent = s + normalize(s - e) * (length(p - s) / n);
+  }
+
+  // How far inside the pane's edges the crossing is, ignoring the pane's own
+  // axis, and no further in than p is in the water.
+  vec3 edge = mix(min(s - lo, hi - s), vec3(1.0), abs(N));
+  inPane = min(min(edge.x, edge.y), min(edge.z, -dry));
+  return apparent;
+}
+
+vec3 apparentPosition(vec3 p) {
+  float inPane;
+  return throughPane(p, inPane);
+}
+`;
+
+/**
+ * For fragment shaders: whether this pass is the one that sees a point, from
+ * the point's true position. See APPARENT_POSITION.
+ */
+const PANE_CLIP = /* glsl */ `
+uniform vec3 uCameraPos;
+${APPARENT_POSITION}
+bool seenThroughThisPane(vec3 p) {
+  float inPane;
+  throughPane(p, inPane);
+  return inPane >= 0.0;
+}
+`;
+
+/**
  * Thin-film interference.
  *
  * This is what a betta's colour actually is. The scales contain stacked guanine
@@ -214,32 +357,7 @@ out vec2 vUV;
 out vec2 vExtra;
 out vec3 vView;
 
-// Where a point under water *appears* to be from an eye outside it.
-//
-// Light from a point inside the tank bends at the pane on its way out, and to
-// the eye the point sits closer than it is: a tank 25 cm deep looks about 19.
-// Every fish tank does this and it is one of the strongest cues that there is
-// water behind the glass rather than air, because the sand, the plants and the
-// fish all shift against the frame as the viewer moves.
-//
-// This is the paraxial result — the part of the path inside the water appears
-// shortened by the index of refraction, along the line of sight — applied per
-// vertex. Exact for near-normal viewing, and within a degree or two over the
-// angles a person looks into a tank at.
-vec3 apparentPosition(vec3 p) {
-  if (uRefractIOR <= 1.0) return p;
-  bool eyeInside = all(greaterThan(uCameraPos, uWaterMin)) && all(lessThan(uCameraPos, uWaterMax));
-  bool pointInside = all(greaterThanEqual(p, uWaterMin - 1e-4)) && all(lessThanEqual(p, uWaterMax + 1e-4));
-  if (eyeInside || !pointInside) return p;
-  vec3 d = p - uCameraPos;
-  d += vec3(equal(d, vec3(0.0))) * 1e-7;
-  vec3 t0 = (uWaterMin - uCameraPos) / d;
-  vec3 t1 = (uWaterMax - uCameraPos) / d;
-  vec3 tn = min(t0, t1);
-  float tEnter = clamp(max(max(tn.x, tn.y), tn.z), 0.0, 1.0);
-  vec3 q = uCameraPos + d * tEnter;
-  return q + (p - q) / uRefractIOR;
-}
+${APPARENT_POSITION}
 
 void main() {
   vWorldPos = aPosition;
@@ -276,6 +394,7 @@ in vec3 vNormal;
 in vec2 vUV;
 in vec2 vExtra;
 in vec3 vView;
+${PANE_CLIP}
 
 uniform sampler2D uCaustics;
 uniform float uWaterY;
@@ -316,6 +435,9 @@ void surfaceFrame(vec3 N, vec2 uv, out vec3 T, out vec3 B) {
 
 void main() {
   if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
+  // Only where this pass's pane is the one the eye sees it through; see
+  // APPARENT_POSITION.
+  if (!seenThroughThisPane(vWorldPos)) discard;
   vec3 N0 = normalize(vNormal);
   vec3 N = N0;
   vec3 V = normalize(vView);
@@ -528,6 +650,7 @@ in vec3 vNormal;
 in vec2 vUV;
 in vec2 vExtra;
 in vec3 vView;
+${PANE_CLIP}
 
 uniform sampler2D uCaustics;
 uniform float uWaterY;
@@ -564,6 +687,9 @@ float finReach(float u) {
 
 void main() {
   if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
+  // Only where this pass's pane is the one the eye sees it through; see
+  // APPARENT_POSITION.
+  if (!seenThroughThisPane(vWorldPos)) discard;
 
   float across = vUV.x;     // 0 to 1 across the rays
   float along = vExtra.x;   // 0 at the body, 1 at the end of the simulated rays
@@ -666,6 +792,7 @@ in vec3 vNormal;
 in vec2 vUV;
 in vec2 vExtra;
 in vec3 vView;
+${PANE_CLIP}
 
 uniform sampler2D uCaustics;
 uniform float uWaterY;
@@ -676,6 +803,9 @@ out vec4 fragColour;
 
 void main() {
   if ((vWorldPos.y - uWaterY) * uClipSide < 0.0) discard;
+  // Only where this pass's pane is the one the eye sees it through; see
+  // APPARENT_POSITION.
+  if (!seenThroughThisPane(vWorldPos)) discard;
   vec3 N = normalize(vNormal);
   vec3 V = normalize(vView);
   vec3 L = normalize(uLightDir);
@@ -895,6 +1025,7 @@ in vec3 vNormal;
 in vec2 vUV;
 in vec2 vExtra;
 in vec3 vView;
+${PANE_CLIP}
 
 uniform sampler2D uScene;
 uniform sampler2D uCaustics;
@@ -922,6 +1053,10 @@ void main() {
 
   float NdotV = max(dot(N, V), 1e-4);
   vec3 L = normalize(uLightDir);
+
+  // Only where this pass's pane is the one the eye sees it through; see
+  // APPARENT_POSITION.
+  if (!seenThroughThisPane(vWorldPos)) discard;
 
   // Fresnel, with water's f0 of 0.02.
   float F = fresnelSchlick(NdotV, 0.02);
@@ -1110,21 +1245,8 @@ uniform vec3 uWaterMax;
 uniform float uRefractIOR;
 out vec2 vUV;
 out vec3 vWorldPos;
-// Same apparent-depth shift as the scene geometry; see SCENE_VERT.
-vec3 apparentPosition(vec3 p) {
-  if (uRefractIOR <= 1.0) return p;
-  bool eyeInside = all(greaterThan(uCameraPos, uWaterMin)) && all(lessThan(uCameraPos, uWaterMax));
-  bool pointInside = all(greaterThanEqual(p, uWaterMin - 1e-4)) && all(lessThanEqual(p, uWaterMax + 1e-4));
-  if (eyeInside || !pointInside) return p;
-  vec3 d = p - uCameraPos;
-  d += vec3(equal(d, vec3(0.0))) * 1e-7;
-  vec3 t0 = (uWaterMin - uCameraPos) / d;
-  vec3 t1 = (uWaterMax - uCameraPos) / d;
-  vec3 tn = min(t0, t1);
-  float tEnter = clamp(max(max(tn.x, tn.y), tn.z), 0.0, 1.0);
-  vec3 q = uCameraPos + d * tEnter;
-  return q + (p - q) / uRefractIOR;
-}
+// The same refraction as the scene geometry.
+${APPARENT_POSITION}
 void main() {
   vUV = aUV;
   vWorldPos = aPosition;
@@ -1136,12 +1258,14 @@ export const PELLET_FRAG = /* glsl */ `#version 300 es
 ${COMMON}
 in vec2 vUV;
 in vec3 vWorldPos;
+${PANE_CLIP}
 uniform float uWaterY;
 out vec4 fragColour;
 void main() {
   vec2 d = vUV * 2.0 - 1.0;
   float r2 = dot(d, d);
   if (r2 > 1.0) discard;
+  if (!seenThroughThisPane(vWorldPos)) discard;
   // Shade it as a sphere: the normal follows from the disc coordinate.
   vec3 N = normalize(vec3(d, sqrt(max(0.0, 1.0 - r2))));
   float NdotL = max(dot(N, normalize(uLightDir)), 0.0);
@@ -1158,12 +1282,14 @@ export const BUBBLE_FRAG = /* glsl */ `#version 300 es
 ${COMMON}
 in vec2 vUV;
 in vec3 vWorldPos;
+${PANE_CLIP}
 uniform float uWaterY;
 out vec4 fragColour;
 void main() {
   vec2 d = vUV * 2.0 - 1.0;
   float r2 = dot(d, d);
   if (r2 > 1.0) discard;
+  if (!seenThroughThisPane(vWorldPos)) discard;
   float r = sqrt(r2);
   // A bubble is a thin shell of air in water: almost invisible in the middle,
   // with a bright rim where the view grazes the surface and total internal
