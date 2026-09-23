@@ -716,8 +716,10 @@ export class FishBrain {
       case 'surface': {
         // Approach, break the surface, gulp, leave. The gulp is what the whole
         // drive exists for and it is worth doing properly: the snout genuinely
-        // crosses the water line, which makes real ripples.
-        const surfaceY = water.heightAt(loco.position.x, loco.position.z);
+        // crosses the water line, which makes real ripples. The water line is
+        // taken where the snout is: with the surface rippled, the height above
+        // the middle of the body can be a couple of millimetres off.
+        const surfaceY = water.heightAt(this.mouth.x, this.mouth.z);
         this.surfaceTimer += dt;
         switch (this.surfacePhase) {
           case 'approach': {

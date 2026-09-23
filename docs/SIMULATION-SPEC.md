@@ -230,6 +230,36 @@ make that pass — it passes because the wave speed is physical.
 Reflecting (Neumann, `du/dn = 0`) boundaries at all four walls, which is what makes
 water pile up in a corner when you tilt the phone.
 
+**Desktop preview, not yet ported: the surface as standing waves.** The grid
+equation above moves every wave at `c = 0.913 m/s`, which is right for the slosh
+and about four times too fast for the 2 to 5 cm ripples that make the caustics
+(a 3 cm ripple travels at 0.25 m/s). The preview instead writes the surface as
+the tank's standing waves, `cos(m pi x / W) cos(n pi z / D)` for the `80 x 58`
+lowest `(m, n)`, which satisfy the same wall condition exactly. Each mode is a
+damped oscillator at
+
+```
+omega^2 = (g k + (sigma / rho) k^3) tanh(k h),   sigma = 0.072 N/m
+Gamma   = beta / 2 + filmDamping * k * sqrt(nu * omega / 8)
+```
+
+the second term being the damping of an inextensible surface film (Lamb 1932;
+Miles 1967), with `filmDamping = 1`. A mode is advanced with the exact solution
+of its oscillator over `dt = 1/240 s`, so there is no stability limit; forcing
+enters as a shift of the mode's resting point by `F / omega^2`. Heights and
+slopes (exact, from the sine series) are rebuilt only when read, once per
+frame. Measured slosh period: 0.807 s against 0.835 s from the finite-depth
+formula (`water.slosh` now checks within 10 % of that formula). A steady tank
+acceleration `a` settles the surface to slope `-a / g` (test).
+
+**Agitation** (desktop preview). Every mode also gets a random velocity kick
+each step, `q sqrt(dt) N(0, 1)`, with `q` chosen so its steady variance
+`q^2 / (4 Gamma omega^2)` follows a log-normal slope spectrum: rms slope
+`0.015`, centred on `5 cm`, log-width `0.35` (per step of `ln k`: each mode's
+height weight is the target divided by `k^4`, for the `k^2` growth in the number
+of modes and the `k^2` more slope per unit height). This stands in for the eddies
+the filter current carries across the whole surface. Off when the outlet is off.
+
 ### 3.2 Forcing terms
 
 **Sloshing from device motion.** The phone's linear acceleration `a` (world frame, from
@@ -255,6 +285,21 @@ travelling wave rather than a rigid tilt of the whole surface.
 proportional to its vertical velocity, weighted by a `0.02 m` Gaussian and by segment
 frontal area. A surface gulp therefore makes a real ring of ripples, because the fish's
 snout genuinely broke the surface.
+
+In the desktop preview a fish swimming horizontally just under the surface also
+holds it in a shallow dip (`World.holdSurfaceOverFish`). Each body slice is a
+doublet of the water it carries (its volume, plus its added mass when moving
+sideways), mirrored in the surface as if it were a lid; the height the surface
+is held to is `U . grad(phi) / g` along the lid, softened by surface tension
+and capped at `U^2 / 2g`. `U` is the fish's velocity averaged over about a tail
+beat (a third of a second), the same for every slice: the picture is of a body
+gliding steadily, and the tail's beat, the body's swing in a turn and the
+fish's acceleration are left out, since followed frame by frame they set the
+surface ringing by millimetres. With the back 3 mm under at 10 cm/s this is a
+dip of about 0.08 mm; over three simulated minutes it stayed under 0.1 mm nine
+tenths of the time and never passed 0.7 mm. The fins are left out too: counted
+as stiff plates they give dips of several millimetres, more than moving water
+can make.
 
 **Pellets.** A pellet crossing the surface injects an impulse into `du/dt` of
 `-0.05 * v_impact` over a `0.004 m` radius.
@@ -291,6 +336,15 @@ with slow flutter in both strength and frequency, sized to give ripples of
 about a millimetre. Applied every substep, not per frame, so the ripple height
 does not depend on the frame rate. Test: peak displacement between 0.2 and 3 mm,
 finite over a long run.
+
+*Desktop preview:* six patches `7 mm` across within `25 mm` of the outlet, each
+pushed by its own band-limited noise (a resonator at `6 Hz`, `Q = 1.5`, the
+frequency of a 5 cm ripple), push `1.6 m/s^2`. Test: rms height between 0.05
+and 2 mm (measured 0.22), peak under 1 cm, finite over a long run.
+
+*Desktop preview:* a gulp also leaves a hollow of `50 mm^3` (`WATER.gulpVolume`,
+radius `4 mm`) at the snout, applied as a change of height rather than speed
+(`WaterSurface.displace`).
 
 ## 4. Fish locomotion
 
@@ -822,6 +876,39 @@ projects them to the substrate; caustic intensity at a point is the ratio of the
 original grid cell area to the deformed cell area (the Jacobian of the refraction map).
 Scattered additively into a `256 x 256` map, then blurred `1.5 px`. Because it is
 computed from the actual surface, the caustics move correctly when the water sloshes.
+
+*Desktop preview, not yet ported:* the rays are a `480 x 340` triangle mesh
+rather than points, drawn into a `1024 x 1024` map, each triangle carrying its
+exact area ratio (so a flat surface reads exactly 1.0 and needs no calibration).
+The surface they refract through is the simulated one alone (the modal solver,
+§3.1), read with a smooth bicubic interpolation of its height and exact slopes
+so the curvature has no kinks at grid nodes, plus the fine ripple layer. The
+map is blurred by the lamp's angular radius (`0.02 rad`) over the water depth.
+
+**Fine ripples** (desktop preview, not yet ported). A `256 x 183` grid (1.37 mm)
+on the graphics card, `d2u/dt2 = c^2 lap(u) + nu lap(du/dt) - 0.225 du/dt` with
+`c = 0.24 m/s` (the speed of 1 to 3 cm capillary-gravity ripples),
+`nu = 1.8e-5 m^2/s` (so `nu k^2 / 2` matches the film damping at 2 cm), step
+`1/480 s`, reflecting walls. Every `disturb()` and `displace()` of the coarse
+surface is logged and replayed here as its Gaussian less a wider one of equal
+volume (width added in quadrature: the coarse grid's `4.4 mm`), so the coarse
+and fine layers do not count the same water twice. Drawing only: the caustic
+rays and the surface normal add its slopes; nothing in the simulation reads it.
+
+**Specks** (desktop preview, not yet ported). 900 particles, radius `0.03` to
+`0.22 mm` drawn log-uniformly, excess density `25 kg/m^3` (Stokes settling
+from `0.06 mm/s` for the smallest to `3 mm/s` for the largest), eddy diffusivity `4e-7 m^2/s`, advected by
+the bulk flow and respawned at a random point when they reach the floor.
+Radiance `2 * albedo * E * p(theta)` with
+`p = 0.5 * HG(0.9) + 0.5 / (4 pi)`, where `E` is the lamp light after caustics
+(the floor map faded by depth fraction), shadows and absorption. Drawn as
+points at least 2 px across, with alpha scaled so each covers its true area.
+
+**Shadows** (desktop preview, not yet ported). A `1024 x 1024` depth map from
+the refracted light direction for the body and plants, and a second map of the
+light the fins transmit, tinted by their pigment. Soft edges by blocker search:
+penumbra width `2 * gap * 0.02 + 0.7 mm`, capped at `12 mm`. The same depth map,
+sampled over a 1 to 2 cm radius, dims the ambient light under overhangs.
 
 **Fish skin.** Layered:
 1. GGX specular for the mucus layer, roughness `0.14`.

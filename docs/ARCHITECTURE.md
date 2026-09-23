@@ -10,7 +10,7 @@ docs/SIMULATION-SPEC.md          the numerical contract both ports implement
 preview/                         desktop: TypeScript + WebGL2
   src/sim/                       the simulation
   src/render/                    a preview renderer
-  src/test/                      47 tests, run with `npm test`
+  src/test/                      49 tests, run with `npm test`
 
 ios/Aquarium/                    phone: Swift + Metal + ARKit
   Sources/Sim/                   the same simulation, ported
@@ -99,6 +99,24 @@ Seven passes, in this order:
 6. **Glass** — the front pane, which is the phone's own screen.
 7. **Post** — tone mapping and camera-matched grain.
 
+The desktop preview (`preview/src/render/`) has no camera or glass pass, and
+has one the phone does not have yet: **shadows**, drawn after the caustics. The
+body and the plants are rendered as depth from the light (after it bends at the
+surface), and the fins into a second map holding the light they let through.
+The scene shaders look both up, with a soft edge whose width grows with the gap
+between the thing casting the shadow and the surface receiving it. The scene
+pass also draws a few hundred specks drifting in the water (`particulate.ts`),
+lit by the same caustics and shadows.
+
+The preview's water surface (`preview/src/sim/water.ts`) is also solved
+differently from the phone's: as the tank's standing waves, each advanced
+exactly, rather than as a wave equation on a grid. See spec §3.1. On top of it,
+`render/ripples.ts` runs a much finer ripple layer on the graphics card for the
+rings touches send out, replayed from a log the surface keeps; it is drawn,
+not simulated against. A fish swimming just under the surface also holds it in
+a shallow dip over its back (`World.holdSurfaceOverFish`), which the sand
+shows as a faint patch of light following the fish.
+
 **Why the volume pass sits where it does.** It has to come after the scene and
 before the surface, because the absorption applies to light travelling from the
 object to the eye, and the surface then bends whatever is left. Doing the surface
@@ -182,7 +200,7 @@ knock through its lateral line.
 
 ## Testing
 
-`preview/src/test/` holds 47 tests in four files:
+`preview/src/test/` holds 49 tests in four files:
 
 - `physics.test.js` — conservation, stability, the water's sloshing period against
   the analytic result, pellet terminal velocity against Schiller-Naumann.

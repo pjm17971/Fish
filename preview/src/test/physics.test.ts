@@ -16,18 +16,21 @@ import { WaterSurface, BulkFlow } from '../sim/water.js';
 import { FoodSystem, analyticTerminalSinkSpeed } from '../sim/food.js';
 import { Rng } from '../sim/rng.js';
 import { v3 } from '../sim/math.js';
-import { GRAVITY, RHO_WATER, TANK, WATER, WATER_DEPTH } from '../sim/config.js';
+import { World } from '../sim/world.js';
+import { GRAVITY, RHO_WATER, TANK, TANK_MIN_Z, WATER, WATER_DEPTH } from '../sim/config.js';
 
 // ---------------------------------------------------------------------------
 // Water
 // ---------------------------------------------------------------------------
 
 test('the tank sloshes at the period a tank this size really has', () => {
-  // The fundamental sloshing period of a rectangular tank of length W and depth
-  // h is T = 2W / sqrt(g*h) — a standard shallow-water result. Nothing in the
-  // water code is tuned to reproduce it; it comes out because the wave speed
-  // used is sqrt(g*h) rather than a number picked to look right.
-  const expected = (2 * TANK.width) / Math.sqrt(GRAVITY * WATER_DEPTH);
+  // The fundamental sloshing mode of a rectangular tank of length W and depth h
+  // is a half wavelength across the tank, k = pi / W, and water waves of that
+  // length oscillate at omega^2 = g k tanh(k h). (The shallow-water shortcut,
+  // T = 2W / sqrt(g h), is 8% fast for a tank this deep.) Nothing in the water
+  // code is tuned to reproduce it; it comes out of the wave physics.
+  const k = Math.PI / TANK.width;
+  const expected = (2 * Math.PI) / Math.sqrt(GRAVITY * k * Math.tanh(k * WATER_DEPTH));
 
   const water = new WaterSurface(WATER.nx, WATER.nz, false);
   // Tip the tank briefly to set the fundamental mode going, then let it ring.
@@ -56,15 +59,15 @@ test('the tank sloshes at the period a tank this size really has', () => {
 
   const error = Math.abs(measured - expected) / expected;
   assert.ok(
-    error < 0.2,
+    error < 0.1,
     `sloshing period is ${measured.toFixed(3)} s, theory says ${expected.toFixed(3)} s (${(error * 100).toFixed(1)}% out)`,
   );
 });
 
 test('the water surface stays bounded under continuous shaking', () => {
-  // An explicit wave equation is only conditionally stable, so this is really a
-  // check that the CFL condition holds for the grid actually built rather than
-  // for the one the spec describes.
+  // Each wave on the surface is advanced exactly, so nothing should be able to
+  // grow without bound however the tank is shaken — this checks that the
+  // forcing and the damping between them keep it that way.
   const water = new WaterSurface(WATER.nx, WATER.nz, false);
   const rng = new Rng(7);
   for (let i = 0; i < 3000; i++) {
@@ -102,26 +105,32 @@ test('a disturbance dies away rather than ringing forever', () => {
   assert.ok(late < early * 0.2, `ripples barely decayed: ${early.toExponential(2)} -> ${late.toExponential(2)}`);
 });
 
-test('the filter outlet keeps a millimetre of ripple going, and no more', () => {
-  // The tank is never still: the filter's return stream keeps a patch of small
-  // ripples going at the outlet, and those ripples are most of what makes the
-  // water visible. The source is continuous, so two things have to be true of
-  // it: the ripples must settle at about a millimetre rather than growing, and
-  // nothing may go non-finite over a long run with the source on.
+test('the filter keeps the surface moving a little, and no more', () => {
+  // The tank is never quite still: the filter's return stream and the current
+  // it drives keep small ripples going. The sources are continuous, so two
+  // things have to be true: the surface must settle at a fraction of a
+  // millimetre of movement rather than growing, and nothing may go non-finite
+  // over a long run with them on.
   const water = new WaterSurface();
   let peak = 0;
+  let sumSq = 0;
+  let count = 0;
   for (let i = 0; i < 40 * 60; i++) {
     water.step(1 / 60);
     if (i > 5 * 60) {
       for (let k = 0; k < water.height.length; k++) {
         const h = Math.abs(water.height[k]);
-        assert.ok(Number.isFinite(h), 'the surface went non-finite with the outlet running');
+        assert.ok(Number.isFinite(h), 'the surface went non-finite with the filter running');
         if (h > peak) peak = h;
+        sumSq += h * h;
+        count++;
       }
     }
   }
-  assert.ok(peak > 0.0002, `the outlet barely moved the surface: ${(peak * 1000).toFixed(2)} mm peak`);
-  assert.ok(peak < 0.003, `the outlet ripple grew to ${(peak * 1000).toFixed(2)} mm; a filter return makes about one`);
+  const rms = Math.sqrt(sumSq / count);
+  assert.ok(rms > 0.00005, `the filter barely moved the surface: ${(rms * 1000).toFixed(3)} mm rms`);
+  assert.ok(rms < 0.002, `the surface moves ${(rms * 1000).toFixed(2)} mm rms; a gentle filter makes a fraction of one`);
+  assert.ok(peak < 0.01, `the surface peaked at ${(peak * 1000).toFixed(2)} mm`);
 });
 
 test('the bulk flow field is divergence free', () => {
@@ -338,11 +347,77 @@ test('wrapped Cauchy turn angles have the heavy tails a Gaussian lacks', () => {
   );
 });
 
-test('the water grid respects its own CFL limit', () => {
-  // Constructing the surface throws if the timestep is too large for the grid,
-  // so this is really a check that the shipped configuration is inside the
-  // stability region rather than close to its edge.
+test('a steadily accelerating tank tilts its surface to the right slope', () => {
+  // Water in a tank that is speeding up steadily leans back until its surface
+  // is at right angles to the combined pull of gravity and the acceleration: a
+  // slope of a / g. This is what the tank's motion drives the surface towards,
+  // so if the slope were wrong every slosh would be too.
   const water = new WaterSurface(WATER.nx, WATER.nz, false);
-  const limit = Math.min(water.dx, water.dz) / (WATER.waveSpeed * Math.SQRT2);
-  assert.ok(WATER.dt < limit * 0.9, `water timestep ${WATER.dt} is within 10% of the CFL limit ${limit.toFixed(5)}`);
+  const ax = 1.0;
+  water.setTankAcceleration(ax, 0);
+  for (let i = 0; i < 240 * 30; i++) water.step(1 / 240);
+  const j = Math.floor(water.nz / 2);
+  const i0 = Math.floor(water.nx * 0.25);
+  const i1 = Math.floor(water.nx * 0.75);
+  const slope = (water.height[water.index(i1, j)] - water.height[water.index(i0, j)]) / (water.worldX(i1) - water.worldX(i0));
+  const expected = -ax / GRAVITY;
+  assert.ok(
+    Math.abs(slope - expected) < 0.05 * Math.abs(expected),
+    `surface slope is ${slope.toFixed(4)}, expected ${expected.toFixed(4)}`,
+  );
+});
+
+test('held surface: the water takes the shape it is held to, and springs back when let go', () => {
+  const water = new WaterSurface(WATER.nx, WATER.nz, false);
+  // A dip 0.2 mm deep and a few centimetres across, centred in the tank.
+  const shape = new Float32Array(water.nx * water.nz);
+  const cz = TANK_MIN_Z + TANK.depth / 2;
+  for (let j = 0; j < water.nz; j++) {
+    for (let i = 0; i < water.nx; i++) {
+      const d2 = water.worldX(i) ** 2 + (water.worldZ(j) - cz) ** 2;
+      shape[water.index(i, j)] = -2e-4 * Math.exp(-d2 / (2 * 0.015 ** 2));
+    }
+  }
+  water.holdSurface(shape);
+  for (let i = 0; i < 6 * 120; i++) water.step(1 / 120);
+  const held = water.heightAt(0, cz) - TANK.waterY;
+  // Surface tension makes a dip this narrow a few per cent shallower than
+  // gravity alone would, and the dip has to come from water spread over the
+  // whole surface, which rises by a hair to make up for it.
+  assert.ok(held < -1.6e-4 && held > -2.1e-4, `held at ${(held * 1000).toFixed(3)} mm, wanted about -0.18`);
+
+  water.holdSurface(null);
+  for (let i = 0; i < 12 * 120; i++) water.step(1 / 120);
+  const after = water.heightAt(0, cz) - TANK.waterY;
+  assert.ok(Math.abs(after) < 2e-5, `still ${(after * 1000).toFixed(3)} mm out after release`);
+});
+
+test('a fish gliding just under the surface dips it over its back, by a fraction of a millimetre', () => {
+  const world = new World({ seed: 3 });
+  const loco = world.locomotion;
+  // Level, its back 3 mm under the surface, gliding forward at 10 cm/s.
+  const deepest = Math.max(...world.morphology.segments.map((s) => s.depth));
+  loco.position.y = TANK.waterY - deepest / 2 - 0.003;
+  const forward = loco.forward(v3());
+  const speed = 0.1;
+  loco.velocity.x = forward.x * speed;
+  loco.velocity.y = 0;
+  loco.velocity.z = forward.z * speed;
+  loco.angularVelocity.x = loco.angularVelocity.y = loco.angularVelocity.z = 0;
+  // A long step, so the speed it averages over a tail beat has caught up.
+  (world as unknown as { holdSurfaceOverFish(dt: number): void }).holdSurfaceOverFish(10);
+  const hold = (world as unknown as { surfaceHold: Float32Array }).surfaceHold;
+
+  let lowest = 0;
+  let highest = 0;
+  for (const h of hold) {
+    lowest = Math.min(lowest, h);
+    highest = Math.max(highest, h);
+  }
+  // Over the back the water runs faster and the surface sags; the most it can
+  // sag is about half of U^2 / g (0.5 mm here). Ahead of the snout and
+  // behind the tail it stands a little higher.
+  assert.ok(lowest < -2e-5, `the surface barely dips: ${(lowest * 1000).toFixed(3)} mm`);
+  assert.ok(lowest > (-0.5 * speed * speed) / GRAVITY - 1e-6, `dips too far: ${(lowest * 1000).toFixed(3)} mm`);
+  assert.ok(highest > 0 && highest < -lowest, `the rise round it (${(highest * 1000).toFixed(3)} mm) should be smaller than the dip`);
 });
