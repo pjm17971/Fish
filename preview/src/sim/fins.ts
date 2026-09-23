@@ -559,22 +559,33 @@ export class FinCloth {
  */
 export function buildFins(morph: Morphology): FinCloth[] {
   const segs = morph.segments;
-  const n = segs.length;
   const L = morph.standardLength;
-  const segAt = (s: number): number => Math.max(0, Math.min(n - 1, Math.round(s * n - 0.5)));
+  // Fin positions are given as fractions of the *body* length, so they index
+  // the body segments only. Scaling by the whole list, caudal segments
+  // included, slid every fin a quarter of the way further back than intended
+  // and rooted the rear of the dorsal and anal fins on the tail fin.
+  const nBody = segs.filter((sg) => !sg.isCaudal).length;
+  const segAt = (s: number): number => Math.max(0, Math.min(nBody - 1, Math.round(s * nBody - 0.5)));
 
   const fins: FinCloth[] = [];
 
   // --- Caudal: rays radiate from the peduncle and fan vertically ---
+  //
+  // The peduncle is the last segment of the *body*, not the last in the list:
+  // the list carries on past it with the caudal segments, which are the tail
+  // fin as the propulsion sees it. Rooting the sheet on the last of those put
+  // the whole visible tail fin one fin-length behind the body, with a gap
+  // between them, and made the fish half again as long as it is.
   {
     const spec = FINS.caudal;
+    const peduncle = nBody - 1;
     const attachments: Attachment[] = [];
     for (let r = 0; r < spec.rows; r++) {
       const t = r / (spec.rows - 1);
       attachments.push({
-        segment: n - 1,
+        segment: peduncle,
         offNormal: 0,
-        offUp: (t - 0.5) * segs[n - 1].depth * 1.2,
+        offUp: (t - 0.5) * segs[peduncle].depth * 0.85,
       });
     }
     // Half-angle set so the trailing edge sweeps the intended span:

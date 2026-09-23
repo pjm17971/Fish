@@ -10,7 +10,7 @@ docs/SIMULATION-SPEC.md          the numerical contract both ports implement
 preview/                         desktop: TypeScript + WebGL2
   src/sim/                       the simulation
   src/render/                    a preview renderer
-  src/test/                      38 tests, run with `npm test`
+  src/test/                      49 tests, run with `npm test`
 
 ios/Aquarium/                    phone: Swift + Metal + ARKit
   Sources/Sim/                   the same simulation, ported
@@ -113,7 +113,9 @@ differently from the phone's: as the tank's standing waves, each advanced
 exactly, rather than as a wave equation on a grid. See spec §3.1. On top of it,
 `render/ripples.ts` runs a much finer ripple layer on the graphics card for the
 rings touches send out, replayed from a log the surface keeps; it is drawn,
-not simulated against.
+not simulated against. A fish swimming just under the surface also holds it in
+a shallow dip over its back (`World.holdSurfaceOverFish`), which the sand
+shows as a faint patch of light following the fish.
 
 **Why the volume pass sits where it does.** It has to come after the scene and
 before the surface, because the absorption applies to light travelling from the
@@ -121,6 +123,17 @@ object to the eye, and the surface then bends whatever is left. Doing the surfac
 first and fogging afterwards is the more common arrangement, and it puts the haze
 in front of the reflections — which looks like a dirty window rather than deep
 water.
+
+**Refraction at the panes.** In the desktop preview, everything under the water is
+drawn where it *appears* to be, not where it is: each vertex is moved onto the
+line of sight that Snell's law gives through the pane it is seen through, so the
+tank looks shallower, the fish looks nearer and bigger, and the view changes
+shape as you walk round. The scene is drawn once per pane the eye can see (at
+most three) plus once for what is out of the water, and each pass keeps only the
+pixels whose line of sight really crosses its pane — so an object near a corner
+of the tank shows up twice, as it does in a real one. `apparentPosition` in
+`shaders.ts` is the calculation; `refraction.ts` is the same thing in
+TypeScript, for the tests. The phone app does not do this yet.
 
 Everything before the post pass works in half-float. The water and the thin-film
 colours on the fish's flanks both have a much wider range than eight bits can
@@ -187,7 +200,7 @@ knock through its lateral line.
 
 ## Testing
 
-`preview/src/test/` holds 38 tests in three files:
+`preview/src/test/` holds 49 tests in four files:
 
 - `physics.test.js` — conservation, stability, the water's sloshing period against
   the analytic result, pellet terminal velocity against Schiller-Naumann.
@@ -196,6 +209,10 @@ knock through its lateral line.
 - `behaviour.test.js` — that decisions have hysteresis, that drives really
   accumulate and discharge, that the drive hierarchy holds under conflict, that a
   run is reproducible from its seed.
+- `optics.test.js` — refraction at the panes: Snell's law at every crossing, a
+  tank looking shallower by the index of water, an upright stick looking
+  shorter through the surface by the textbook ratio, and the double image at a
+  corner.
 
 Every assertion is against a number derived independently — from the literature or
 analytically — and never against the output of a previous run. A test that asserts

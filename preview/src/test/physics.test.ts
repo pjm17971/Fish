@@ -16,7 +16,8 @@ import { WaterSurface, BulkFlow } from '../sim/water.js';
 import { FoodSystem, analyticTerminalSinkSpeed } from '../sim/food.js';
 import { Rng } from '../sim/rng.js';
 import { v3 } from '../sim/math.js';
-import { GRAVITY, RHO_WATER, TANK, WATER, WATER_DEPTH } from '../sim/config.js';
+import { World } from '../sim/world.js';
+import { GRAVITY, RHO_WATER, TANK, TANK_MIN_Z, WATER, WATER_DEPTH } from '../sim/config.js';
 
 // ---------------------------------------------------------------------------
 // Water
@@ -364,4 +365,59 @@ test('a steadily accelerating tank tilts its surface to the right slope', () => 
     Math.abs(slope - expected) < 0.05 * Math.abs(expected),
     `surface slope is ${slope.toFixed(4)}, expected ${expected.toFixed(4)}`,
   );
+});
+
+test('held surface: the water takes the shape it is held to, and springs back when let go', () => {
+  const water = new WaterSurface(WATER.nx, WATER.nz, false);
+  // A dip 0.2 mm deep and a few centimetres across, centred in the tank.
+  const shape = new Float32Array(water.nx * water.nz);
+  const cz = TANK_MIN_Z + TANK.depth / 2;
+  for (let j = 0; j < water.nz; j++) {
+    for (let i = 0; i < water.nx; i++) {
+      const d2 = water.worldX(i) ** 2 + (water.worldZ(j) - cz) ** 2;
+      shape[water.index(i, j)] = -2e-4 * Math.exp(-d2 / (2 * 0.015 ** 2));
+    }
+  }
+  water.holdSurface(shape);
+  for (let i = 0; i < 6 * 120; i++) water.step(1 / 120);
+  const held = water.heightAt(0, cz) - TANK.waterY;
+  // Surface tension makes a dip this narrow a few per cent shallower than
+  // gravity alone would, and the dip has to come from water spread over the
+  // whole surface, which rises by a hair to make up for it.
+  assert.ok(held < -1.6e-4 && held > -2.1e-4, `held at ${(held * 1000).toFixed(3)} mm, wanted about -0.18`);
+
+  water.holdSurface(null);
+  for (let i = 0; i < 12 * 120; i++) water.step(1 / 120);
+  const after = water.heightAt(0, cz) - TANK.waterY;
+  assert.ok(Math.abs(after) < 2e-5, `still ${(after * 1000).toFixed(3)} mm out after release`);
+});
+
+test('a fish gliding just under the surface dips it over its back, by a fraction of a millimetre', () => {
+  const world = new World({ seed: 3 });
+  const loco = world.locomotion;
+  // Level, its back 3 mm under the surface, gliding forward at 10 cm/s.
+  const deepest = Math.max(...world.morphology.segments.map((s) => s.depth));
+  loco.position.y = TANK.waterY - deepest / 2 - 0.003;
+  const forward = loco.forward(v3());
+  const speed = 0.1;
+  loco.velocity.x = forward.x * speed;
+  loco.velocity.y = 0;
+  loco.velocity.z = forward.z * speed;
+  loco.angularVelocity.x = loco.angularVelocity.y = loco.angularVelocity.z = 0;
+  // A long step, so the speed it averages over a tail beat has caught up.
+  (world as unknown as { holdSurfaceOverFish(dt: number): void }).holdSurfaceOverFish(10);
+  const hold = (world as unknown as { surfaceHold: Float32Array }).surfaceHold;
+
+  let lowest = 0;
+  let highest = 0;
+  for (const h of hold) {
+    lowest = Math.min(lowest, h);
+    highest = Math.max(highest, h);
+  }
+  // Over the back the water runs faster and the surface sags; the most it can
+  // sag is about half of U^2 / g (0.5 mm here). Ahead of the snout and
+  // behind the tail it stands a little higher.
+  assert.ok(lowest < -2e-5, `the surface barely dips: ${(lowest * 1000).toFixed(3)} mm`);
+  assert.ok(lowest > (-0.5 * speed * speed) / GRAVITY - 1e-6, `dips too far: ${(lowest * 1000).toFixed(3)} mm`);
+  assert.ok(highest > 0 && highest < -lowest, `the rise round it (${(highest * 1000).toFixed(3)} mm) should be smaller than the dip`);
 });

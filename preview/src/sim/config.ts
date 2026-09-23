@@ -317,6 +317,15 @@ export const WATER = {
   fishCouplingRange: 0.020,
   fishCouplingGain: 0.35,
   /**
+   * The dip over a fish swimming just under the surface (see
+   * World.holdSurfaceOverFish): how deep a slice of the fish can be and
+   * still count, and how far across the surface its effect is worked out.
+   * The effect falls off as the cube of depth, so at 3 cm it is a few
+   * hundredths of what it is at 1 cm.
+   */
+  fishHoldDepth: 0.03,
+  fishHoldReach: 0.04,
+  /**
    * The hollow a gulp leaves, m^3. The snout, about 4 mm across and 4 mm
    * deep at the tip, comes up about 3 mm through the surface to take air and
    * draws the water up round it; when it drops away the water there falls
