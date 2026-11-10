@@ -64,6 +64,7 @@ import {
 import { TIP_S, Morphology } from './morphology.js';
 import { FishBody, MotorCommand, pectoralPose } from './fishBody.js';
 import { WaterSurface, BulkFlow } from './water.js';
+import { Obstacles } from './obstacles.js';
 
 /** A force applied at a point, used to report contributions for debugging and tests. */
 export interface ForceBreakdown {
@@ -99,7 +100,15 @@ const scratch = {
   bladeN: v3(),
   bladeV: v3(),
   eyeTmp: v3(),
+  slice: v3(),
+  out: v3(),
 };
+
+/**
+ * The slices of the body checked against the glass, the wood and the stones,
+ * as indices into the body's segments: every third one, snout to peduncle.
+ */
+const CONTACT_SLICES = [0, 3, 6, 9, 12, 15, 18, 21, 23];
 
 interface SegmentWork {
   /** Offset from the centre of mass, world space. */
@@ -177,6 +186,12 @@ export class FishLocomotion {
     floorY: TANK.floorY,
     ceilY: TANK.waterY + FISH.maxDepth,
   };
+
+  /**
+   * The driftwood and the stones, or null for none. Tests leave it null, for
+   * the same reason as `bounds`.
+   */
+  obstacles: Obstacles | null = null;
 
   /** Per-segment deformation normal velocity from the previous substep. */
   private readonly prevVn: Float64Array;
@@ -942,9 +957,9 @@ export class FishLocomotion {
     // lever it. Giving the tail its full 47 mm lever arm pitched the fish nose
     // down every time its tail brushed the glass and drove it into the sand,
     // which read as bouncing off the bottom.
-    const push = (nx: number, ny: number, nz: number, point: Vec3, penetration: number): void => {
+    const push = (nx: number, ny: number, nz: number, point: Vec3, penetration: number, lever = point === pts[0]): void => {
       if (penetration <= 0) return;
-      const withTorque = point === pts[0];
+      const withTorque = lever;
       sub(scratch.tmp2, point, this.position);
       cross(scratch.tmp, this.angularVelocity, scratch.tmp2);
       add(scratch.tmp, scratch.tmp, this.velocity);
@@ -982,6 +997,36 @@ export class FishLocomotion {
     push(0, 0, -1, q, q.z - b.maxZ);
     q = deepest((pt) => b.floorY - pt.y);
     push(0, 1, 0, q, b.floorY - q.y);
+
+    // The flanks. The six points above are on the fish's centreline, apart
+    // from the pectoral tips, so the side of a fish lying along a pane, or
+    // folded with its head against one, could go a few millimetres through
+    // the glass with nothing to stop it, and the pane then showed a cut
+    // through the fish (measured: up to six millimetres, and a millimetre or
+    // more for about two per cent of its life). So each slice of the body is
+    // checked as well, at its own half-thickness, and the body pushes back
+    // where it meets the glass. These slices are body, not fin, so they
+    // carry their lever.
+    const segs = this.morphology.segments;
+    const states = this.body.segments;
+    const ob = this.obstacles;
+    for (const k of CONTACT_SLICES) {
+      const p = this.toWorld(states[k].pos, scratch.slice);
+      const half = segs[k].width / 2;
+      push(1, 0, 0, p, b.minX - (p.x - half), true);
+      push(-1, 0, 0, p, p.x + half - b.maxX, true);
+      push(0, 0, 1, p, b.minZ - (p.z - half), true);
+      push(0, 0, -1, p, p.z + half - b.maxZ, true);
+      // And the driftwood and the stones, which the fish could swim straight
+      // through before: it had no way of knowing they were there. A slice is
+      // taken as a ball of its mean half-thickness, and pushed straight out
+      // of whatever it has run into.
+      if (ob) {
+        const r = (segs[k].depth + segs[k].width) / 4;
+        const d = ob.hardDistance(p.x, p.y, p.z, scratch.out, r + 0.002);
+        if (d < r) push(scratch.out.x, scratch.out.y, scratch.out.z, p, r - d, true);
+      }
+    }
   }
 
   private integrate(F: Vec3, T: Vec3, dt: number): void {

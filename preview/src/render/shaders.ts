@@ -14,6 +14,7 @@
 
 import { TANK } from '../sim/config.js';
 import { TANK_BOTTOM_Y, LAMP_Y, LAMP_HALF_DEPTH, DESK, ROOM } from './scenery.js';
+import { PLANT_PRESSERS } from '../sim/world.js';
 
 /** A number as a GLSL float literal. */
 const f = (x: number): string => (Number.isInteger(x) ? `${x}.0` : `${x}`);
@@ -558,6 +559,9 @@ out vec3 vView;
 // 1 while drawing the plants, whose aExtra.y is how far each vertex sways.
 uniform float uSway;
 uniform float uTime;
+// Where the fish is pressing on the plants: balls as (centre, radius). See
+// World.updatePlantPress.
+uniform vec4 uPress[${PLANT_PRESSERS}];
 
 ${APPARENT_POSITION}
 
@@ -581,9 +585,35 @@ vec3 swayOffset(vec3 p, float w) {
   return vec3(d.x, 0.0, d.y);
 }
 
+// Leaves pushed aside by the fish.
+//
+// Each part of a leaf inside one of the fish's balls is moved out to its
+// surface, by as much as that part of the leaf gives: nothing at the root,
+// fully at a free tip. How much a leaf gives is read from its sway weight,
+// which is already the square of the distance from the root times how
+// limber the species is; a vallisneria ribbon or a stem gives along most of
+// its length, a crypt leaf mostly towards its tip.
+vec3 pressOffset(vec3 p, float w) {
+  float give = clamp(w / 0.0012, 0.0, 1.0);
+  vec3 d = vec3(0.0);
+  for (int i = 0; i < ${PLANT_PRESSERS}; i++) {
+    vec4 b = uPress[i];
+    vec3 v = p - b.xyz;
+    float l = length(v);
+    if (l < b.w) d += v / max(l, 1e-4) * (b.w - l);
+  }
+  // Never more than a leaf can bend without looking stretched.
+  float m = length(d);
+  if (m > 0.012) d *= 0.012 / m;
+  return d * give;
+}
+
 void main() {
   vec3 p = aPosition;
-  if (uSway > 0.5) p += swayOffset(aPosition, aExtra.y);
+  if (uSway > 0.5) {
+    p += swayOffset(aPosition, aExtra.y);
+    p += pressOffset(p, aExtra.y);
+  }
   vWorldPos = p;
   vNormal = normalize(aNormal);
   vUV = aUV;

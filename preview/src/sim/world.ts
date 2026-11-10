@@ -17,6 +17,8 @@ import { FinCloth, buildFins } from './fins.js';
 import { BulkFlow, WaterSurface } from './water.js';
 import { FoodSystem } from './food.js';
 import { FishBrain, Stimuli } from './brain.js';
+import { Obstacles, tankObstacles } from './obstacles.js';
+import { tankNavGrid } from './navigation.js';
 
 /** A bubble released at the surface when the fish takes a breath. */
 export interface Bubble {
@@ -25,6 +27,14 @@ export interface Bubble {
   age: number;
   alive: boolean;
 }
+
+/** How many balls the fish presses on the plants with; see World.updatePlantPress. */
+export const PLANT_PRESSERS = 16;
+/** How many of them are where the fish has just been. */
+const PRESS_TRAIL = 7;
+/** How often a point is dropped on that trail, and how long a leaf takes to come back, s. */
+const PRESS_TRAIL_EVERY = 0.09;
+const PRESS_SPRING_BACK = 0.6;
 
 const scratch = {
   tmp: v3(),
@@ -46,6 +56,8 @@ export class World {
   readonly food: FoodSystem;
   readonly brain: FishBrain;
   readonly command: MotorCommand;
+  /** The driftwood, the stones and the plants. */
+  readonly obstacles: Obstacles;
 
   readonly bubbles: Bubble[] = [];
 
@@ -59,6 +71,16 @@ export class World {
 
   /** Seconds of simulated time since the start. */
   time = 0;
+
+  /**
+   * Where the fish is pressing on the plants, for the renderer: PLANT_PRESSERS
+   * balls as (x, y, z, radius). The leaves bend out of them (see
+   * updatePlantPress()).
+   */
+  readonly plantPress = new Float32Array(PLANT_PRESSERS * 4);
+  /** Where the fish has been lately, oldest first, as (x, y, z, time). */
+  private readonly pressTrail = new Float32Array(PRESS_TRAIL * 4);
+  private pressTrailTimer = 0;
 
   private hasPrevViewer = false;
   private lastTapTime = -Infinity;
@@ -80,6 +102,10 @@ export class World {
     this.food = new FoodSystem(this.config.seed);
     this.brain = new FishBrain(this.config);
     this.command = createMotorCommand();
+    this.obstacles = tankObstacles();
+    this.locomotion.obstacles = this.obstacles;
+    for (const f of this.fins) f.setSurroundings(this.obstacles, this.water);
+    this.brain.nav = tankNavGrid(this.obstacles);
 
     for (let i = 0; i < 24; i++) {
       this.bubbles.push({ position: v3(), radius: 0, age: 0, alive: false });
@@ -194,6 +220,73 @@ export class World {
     this.water.step(frameDt);
 
     this.stepBubbles(frameDt);
+    this.updatePlantPress(frameDt);
+  }
+
+  /**
+   * Where the fish pushes the plants aside.
+   *
+   * The leaves are drawn bending out of a handful of balls: six along the
+   * body, sized to its depth; one each in the middle of the tail, dorsal and
+   * anal fins; and a short trail of where the body has just been, shrinking
+   * as it ages, so a leaf the fish has pushed past swings back over about
+   * half a second rather than snapping back. A leaf gives more the further it
+   * is from its root, which the renderer takes from the same weight that
+   * sets how far it sways in the current.
+   *
+   * It goes one way only: the plants bend for the fish, and the fish does
+   * not feel them. A leaf weighs a few milligrams and gives at a touch;
+   * what the plants do to the fish is in where it chooses to swim (see
+   * navigation.ts).
+   */
+  private updatePlantPress(dt: number): void {
+    const out = this.plantPress;
+    const L = this.locomotion;
+    const segs = this.morphology.segments;
+    let n = 0;
+    const put = (x: number, y: number, z: number, r: number): void => {
+      out[n * 4] = x;
+      out[n * 4 + 1] = y;
+      out[n * 4 + 2] = z;
+      out[n * 4 + 3] = r;
+      n++;
+    };
+    for (const k of [1, 5, 9, 13, 17, 21]) {
+      L.toWorld(this.body.segments[k].pos, scratch.segWorld);
+      put(scratch.segWorld.x, scratch.segWorld.y, scratch.segWorld.z, segs[k].depth * 0.5 + 0.0025);
+    }
+    for (const fin of this.fins) {
+      const radius = fin.spec.name === 'caudal' ? 0.011 : fin.spec.name === 'dorsal' || fin.spec.name === 'anal' ? 0.007 : 0;
+      if (!radius) continue;
+      let x = 0;
+      let y = 0;
+      let z = 0;
+      const m = fin.pos.length / 3;
+      for (let i = 0; i < fin.pos.length; i += 3) {
+        x += fin.pos[i];
+        y += fin.pos[i + 1];
+        z += fin.pos[i + 2];
+      }
+      put(x / m, y / m, z / m, radius);
+    }
+    // The trail.
+    const tr = this.pressTrail;
+    this.pressTrailTimer -= dt;
+    if (this.pressTrailTimer <= 0) {
+      this.pressTrailTimer = PRESS_TRAIL_EVERY;
+      tr.copyWithin(0, 4);
+      const last = (PRESS_TRAIL - 1) * 4;
+      tr[last] = L.position.x;
+      tr[last + 1] = L.position.y;
+      tr[last + 2] = L.position.z;
+      tr[last + 3] = this.time;
+    }
+    for (let i = 0; i < PRESS_TRAIL && n < PLANT_PRESSERS; i++) {
+      const age = this.time - tr[i * 4 + 3];
+      const r = tr[i * 4 + 3] > 0 ? 0.0075 * Math.max(0, 1 - age / PRESS_SPRING_BACK) : 0;
+      put(tr[i * 4], tr[i * 4 + 1], tr[i * 4 + 2], r);
+    }
+    while (n < PLANT_PRESSERS) put(0, 0, 0, 0);
   }
 
   /**

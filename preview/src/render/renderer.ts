@@ -731,6 +731,7 @@ export class Renderer {
     // The plants' shadows sway with them.
     if (u.uTime) gl.uniform1f(u.uTime, time);
     if (u.uSway) gl.uniform1f(u.uSway, 1);
+    if (u.uPress) gl.uniform4fv(u.uPress, this.world.plantPress);
     this.plantsGpu.draw();
     if (u.uSway) gl.uniform1f(u.uSway, 0);
     this.hardscapeGpu.draw();
@@ -922,6 +923,7 @@ export class Renderer {
     // Leaves are two-sided, and move.
     gl.disable(gl.CULL_FACE);
     if (tu.uSway) gl.uniform1f(tu.uSway, 1);
+    if (tu.uPress) gl.uniform4fv(tu.uPress, this.world.plantPress);
     this.plantsGpu.draw();
     if (tu.uSway) gl.uniform1f(tu.uSway, 0);
 
