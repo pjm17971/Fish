@@ -1,9 +1,8 @@
 /**
  * Does the scenery stay where it is supposed to be?
  *
- * The fish cannot see the stones, the wood or the plants, and nothing stops a
- * procedural layout drifting through the glass or out of the water when a
- * number changes. These check the promises the layout makes.
+ * Nothing stops a procedural layout drifting through the glass or out of
+ * the water when a number changes. These check the promises the layout makes.
  */
 
 import { test } from 'node:test';

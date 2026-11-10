@@ -435,7 +435,12 @@ export class FishBrain {
     // branch is often over it.
     let hard = Infinity;
     const ob = this.nav?.obstacles;
-    if (ob) {
+    // Not while the fish hangs still: a betta resting beside the wood with
+    // its fins brushing it is a betta at rest, and the contact keeps it out.
+    // Counted then, the wood broke off a pause sixteen times in twenty
+    // minutes, against three on the build before (seeds 1 to 6).
+    const resting = this.intention === 'patrol' && this.idleMode === 'pause';
+    if (ob && !resting) {
       const atSnout = ob.hardDistance(snout.x, snout.y, snout.z, scratch.away) - 0.003;
       const atMiddle =
         ob.hardDistance(loco.position.x, loco.position.y, loco.position.z, scratch.tmp) - FISH.maxDepth / 2;

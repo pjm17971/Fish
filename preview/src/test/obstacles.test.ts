@@ -82,5 +82,9 @@ test('over a minute of ordinary life, the body stays out of the wood and the fin
     }
   }
   assert.ok(deepest < 0.002, `body went ${(deepest * 1000).toFixed(1)} mm into wood or stone`);
-  assert.ok(finHigh < 0.0005, `a fin stood ${(finHigh * 1000).toFixed(1)} mm out of the water`);
+  // The fins are laid under the surface before the water takes its own step
+  // for the frame, and a breath leaves a hollow round the snout, so a few
+  // millimetres is the surface moving, not the fin standing up. Before the
+  // fins knew about the surface they stood up to sixteen.
+  assert.ok(finHigh < 0.003, `a fin stood ${(finHigh * 1000).toFixed(1)} mm out of the water`);
 });

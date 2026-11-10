@@ -5,9 +5,9 @@
  * All of it is built procedurally, from a fixed seed, so the layout is the same
  * every run. Nothing here is simulated: the stones and the wood are static, and
  * the plants' sway is a kinematic motion in the vertex shader (see SCENE_VERT),
- * not a solved one. The fish does not know any of it is here — it swims
- * through leaves, as it always has — so the hard pieces are kept low and to the
- * edges, away from where it spends its time and clear of the spot it rests in.
+ * not a solved one; the leaves also bend out of the fish's way (see
+ * World.updatePlantPress). Where everything is comes from sim/scenery.ts,
+ * which the fish uses to find its way round the same things.
  *
  * Layout, looking in through the front glass:
  *
