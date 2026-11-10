@@ -44,7 +44,7 @@ each item is the kind of thing that passes a test and fails an eye:
   static shift of a symmetric wave, which nets nothing at rest; the fish could
   only turn as a rudder does, with water flowing past, on a radius wider than
   the tank. It is now a genuine amplitude asymmetry (§4.1), and large turns are
-  made with a tail scull (§5.6).
+  made with a tail scull (§5.6), since replaced by a folding turn (§5.7).
 - **The glass was a table leg.** A contact spring of 240 N/m threw a fish that
   nosed the pane at forty times its weight. It is 12 N/m.
 - **Fatigue was kinematic.** Counted from speed, being flung by the glass read
@@ -599,6 +599,17 @@ extreme made most of an 8.5 cm deep tank "near a wall". Rotation is damped by th
 drag (quadratic) plus a viscous term with a 2.5 s time constant, so a kicked
 fish does not coast in yaw indefinitely but a slow turn is not smothered.
 
+**Changed with the folding turn (§5.7).** The front and hind points are now
+where the body really has them rather than straight ahead of and behind the
+centre, because on a folded fish those are different places: a fish lying
+along a pane that turned its head away swung an imaginary straight tail
+through the glass and was pushed by up to eleven times its weight. And the
+hind point is the end of the body, where the tail fin is rooted, not the fin's
+tip. The fin is cloth and passes nothing on to the fish; the drawn fin is
+folded against the pane instead (`fins.ts`). With the tip counted as stiff, a
+tail tapping the glass threw the fish off it at four to five body lengths a
+second, because the fish weighs only about two grams along its own length.
+
 ## 5. Behaviour — the fish's brain
 
 The architecture follows Tu and Terzopoulos's *Artificial Fishes* (SIGGRAPH 1994): a
@@ -757,6 +768,81 @@ cruise, turning is the asymmetric beat plus the camber acting as a rudder, with
 a PD law on the heading (gain 1.35, rate 0.035) whose sign is set by
 measurement. The speed controller integrates the tail beat towards the *forward*
 speed error; sinking is not swimming.
+
+### 5.7 Turning round by folding, and a calmer idle life
+
+*This replaces the tail scull above. The preview has it; the iOS Swift port
+does not yet.*
+
+**What was measured first** (two seeds, 200 to 300 s of the fish left alone):
+never still; tail beating 94 % of the time; in the scull about half the time;
+touching glass or sand 20 % of the time, about 78 touches a minute; top speed
+at the 12 SL/s safety limit. The scull turned 23°/s on a circle about 36 cm
+across in a tank 35 by 25 cm, so most turns ended on the glass.
+
+**The turn.** `MotorCommand.curl` (-1 to 1) folds the body by turning each
+short piece of the centreline through an angle that grows from nothing behind
+the head to `FISH.curlMax` (2.0 rad, an estimate) at the tail; `curlAt` is
+where along the body the middle of the fold sits (default 0.635 body lengths),
+`curlWidth` (0.83) how much of the body it spreads over. The turn has two
+parts:
+
+1. *Fold* (0.42 s, tail still). The head comes round by about nine tenths of
+   the fold angle within a centimetre, because the tail and fins hold about
+   thirty times the body's mass in water and the head almost none.
+2. *Follow.* The fish swims (2.2 to 3.2 beats a second) while `curlAt` is run
+   back along the body and off the tail, at 0.45 body lengths a second while
+   there is still turning to do and up to 1.4 once the fish faces its goal.
+
+Unfolding on the spot gives the turn back, and so does running the fold off
+quickly. Measured on the bare swimmer for a 48° fold at 2.5 beats a second:
+run off at 0.5 body lengths a second the fish ends 85° round; at 0.9, 57°; at
+1.5, 32°; unfolded on the spot, under 10°. The fold is capped at three
+quarters: beyond a right angle the tail points across the head's line and its
+beat drives the fish backwards. In the tank, turns average 2.5 s and end
+within a few degrees of what was wanted on average (wanted 66 to 76°, got 68
+to 75°).
+
+**The physics that needed.** The water a slice of the fish carries sideways is
+handled two ways. The beat keeps Lighthill's term. A change of posture (curl,
+steering bend, beat starting or stopping) is handled through the momentum of
+the water it moves, so that what the water is given while the body moves it
+gives back when the body stops. And while the fish is bent or folded the mass
+it presents to forces is worked out from its real shape, as a three-by-three
+matrix over sideways, forwards and yaw, with the momentum carried from step to
+step in the room's frame. Without that a bent fish was treated as a straight
+dart weighing two grams end-on, and a quick bend or fold threw it at the speed
+limit. A straight, unbent fish takes the old path and swims exactly as before
+(`probe-strouhal` unchanged).
+
+**Other things found on the way, each by measurement.**
+- Reflex quickness of the bend (`agility`) is now capped at 0.25 for
+  everything except an escape.
+- Turns are level. The vertical bend and the pectorals' tilt steer by water
+  flowing past, and a folded fish has none: a fish told to dive while turning
+  climbed at 9 cm/s. A hovering or turning fish holds depth with the bladder,
+  which is also fed its own rate of rise (3 s of lead) so it stops bobbing
+  (11 to 13 mm/s of bob while pausing, down to about 5).
+- After dodging a wall the next goal is chosen ahead of the fish, not the
+  least-visited cell of the tank. Goals cost more the further off the nose
+  they are; a goal closer than 13 cm and more than 60° off the nose is given
+  up, because it is inside the turning circle and the fish only orbits it.
+
+**Idle life.** Patrol is now *amble* (0.6 to 1.1 SL/s, a few beats then a
+glide) and *pause* (hover with slow pectoral fanning, an occasional sideways
+look made with a small held curl; 2 s plus an exponential tail, mean about
+8 s, cut short near glass). The split between the two is an estimate, not
+taken from a time-budget study.
+
+**After** (same seeds, 200 s): still 8 to 18 % of the time; touches 24 to 30 a
+minute, 5 to 6 % of the time; top speed about 5 SL/s; mean speed 0.7 to 0.9
+SL/s (was 1.5). `tools/probe-life.mjs` prints these.
+
+**Still not right.** The fish is in a turn about half the time (13 turns a
+minute). During the follow it travels partly along its old heading, because
+thrust comes from the tail, which is the last part to come round. Every way
+of turning this model has, old or new, manages 20 to 40°/s; a real betta
+turns right round in about a second.
 
 ## 6. Food
 

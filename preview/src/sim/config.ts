@@ -114,6 +114,33 @@ export const FISH = {
    * extreme posture — the body folds into a C — and it needs the range.
    */
   bendReflexGain: 2.4,
+  /**
+   * How far round the fish can fold itself to turn, in radians: the angle
+   * between where its head points and where the root of its tail fin points,
+   * at a full curl. A hundred and fifteen degrees. Bettas are among the most
+   * flexible aquarium fish there are; one turning round in a small tank folds
+   * until its tail is nearly alongside its head. (An estimate from watching
+   * them, not a published measurement.)
+   */
+  curlMax: 2.0,
+  /**
+   * Where along the body the middle of the fold sits when the fish first
+   * curls, and how much of the body the fold is spread over, in body lengths
+   * from the snout. The head and the front fifth of the body stay straight.
+   */
+  curlAt: 0.635,
+  curlWidth: 0.83,
+  /**
+   * How fast the fold can run down the body towards the tail, in body lengths
+   * a second. See MotorCommand.curlAt.
+   */
+  curlTravel: 2.5,
+  /**
+   * How briskly the curl is made, per second: the body is most of the way
+   * round in about three divided by this. A deliberate turn takes a quarter
+   * to half a second to fold into.
+   */
+  curlQuickness: 9,
 
   // --- hydrodynamic coefficients ---
   /** Cross-flow drag coefficient for a finite plate at this aspect ratio. */

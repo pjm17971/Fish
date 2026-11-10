@@ -323,3 +323,103 @@ test('the body does not stretch when it bends', () => {
     `the body's length varied by ${(variation * 100).toFixed(2)}% while bending; it should be inextensible`,
   );
 });
+
+/** A fish at rest in open water, settled, with its tail held straight. */
+function atRest() {
+  const morph = buildMorphology();
+  const body = new FishBody(morph);
+  const loco = createLocomotion(morph, body);
+  loco.bounds = null;
+  const cmd = createMotorCommand();
+  cmd.amplitude = 0;
+  cmd.frequency = 0;
+  const dt = FISH.dt;
+  for (let i = 0; i < 1 / dt; i++) loco.step(cmd, null, null, dt);
+  const fwd = v3();
+  let prev = 0;
+  let turned = 0;
+  loco.forward(fwd);
+  prev = Math.atan2(fwd.x, fwd.z);
+  /** Step once and return how far the fish has turned so far, radians. */
+  const step = (): number => {
+    loco.step(cmd, null, null, dt);
+    loco.forward(fwd);
+    const yaw = Math.atan2(fwd.x, fwd.z);
+    let d = yaw - prev;
+    if (d > Math.PI) d -= 2 * Math.PI;
+    if (d < -Math.PI) d += 2 * Math.PI;
+    turned += d;
+    prev = yaw;
+    return turned;
+  };
+  return { loco, cmd, dt, step };
+}
+
+test('folding the body brings the head round, on the spot, without throwing the fish', () => {
+  // The first half of turning round. The tail and the long fins hold about
+  // thirty times the body's mass in water and stay where they are; the head
+  // holds very little and comes round. Before the water a folded fish carries
+  // was worked out from its folded shape, the same fold shot the fish across
+  // the tank at the speed limit.
+  const { loco, cmd, dt, step } = atRest();
+  const start = { ...loco.position };
+  let turned = 0;
+  let top = 0;
+  cmd.curl = 0.75;
+  for (let t = 0; t < 0.6; t += dt) {
+    turned = step();
+    top = Math.max(top, loco.speedSL);
+  }
+  const moved = Math.hypot(loco.position.x - start.x, loco.position.z - start.z);
+  const degrees = Math.abs(turned) * (180 / Math.PI);
+  assert.ok(degrees > 55 && degrees < 95, `a three-quarter fold turned the head ${degrees.toFixed(0)} degrees`);
+  assert.ok(top < 2.5, `folding threw the fish at ${top.toFixed(1)} body lengths a second`);
+  assert.ok(moved < 0.02, `folding moved the fish ${(moved * 1000).toFixed(0)} mm`);
+});
+
+test('a fish that folds and swims out of the fold keeps the turn; one that unfolds on the spot does not', () => {
+  // The second half. Straightening up where it is gives the turn back, because
+  // the head swings back as easily as it came round. Swimming out, with the
+  // fold running back along the body and off the tail, keeps it. Measured: a
+  // 48 degree fold swum out of at 2.5 beats a second ends 85 degrees round;
+  // unfolded on the spot it ends under 15.
+  const turn = (swimOut: boolean): number => {
+    const { cmd, dt, step } = atRest();
+    let turned = 0;
+    cmd.curl = 0.5;
+    for (let t = 0; t < 0.42; t += dt) turned = step();
+    if (swimOut) {
+      cmd.frequency = 2.5;
+      cmd.amplitude = FISH.standardLength * FISH.tailAmplitudeRatio;
+      let at = FISH.curlAt;
+      while (at < 2.0) {
+        at += 0.5 * dt;
+        cmd.curlAt = at;
+        turned = step();
+      }
+    }
+    cmd.curl = 0;
+    cmd.curlAt = FISH.curlAt;
+    for (let t = 0; t < 1; t += dt) turned = step();
+    return Math.abs(turned) * (180 / Math.PI);
+  };
+  const kept = turn(true);
+  const given = turn(false);
+  assert.ok(kept > 60, `swimming out of a fold kept only ${kept.toFixed(0)} degrees`);
+  assert.ok(given < 25, `unfolding on the spot kept ${given.toFixed(0)} degrees, which it should not`);
+});
+
+test('bending to steer does not throw a resting fish', () => {
+  // A full steering bend at the quickness the brain uses for anything short
+  // of a fright. Before the water a bent fish carries was worked out from its
+  // bent shape, this threw the fish at the 12 body-lengths-a-second limit.
+  const { loco, cmd, dt, step } = atRest();
+  let top = 0;
+  cmd.bend = -1;
+  cmd.agility = 0.25;
+  for (let t = 0; t < 0.8; t += dt) {
+    step();
+    top = Math.max(top, loco.speedSL);
+  }
+  assert.ok(top < 3, `a steering bend threw the fish at ${top.toFixed(1)} body lengths a second`);
+});

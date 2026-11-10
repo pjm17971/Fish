@@ -53,6 +53,7 @@ import {
   WorldConfig,
 } from './config.js';
 import { Rng } from './rng.js';
+import { TIP_S } from './morphology.js';
 import { MotorCommand } from './fishBody.js';
 import { FishBody } from './fishBody.js';
 import { FishLocomotion } from './locomotion.js';
@@ -131,6 +132,18 @@ export interface MotorGoal {
   mouthOpen: number;
   /** Whether the fish should be holding station rather than travelling. */
   hover: boolean;
+  /**
+   * Coasting: the tail stops and the fish runs on with what speed it has. A
+   * fish going nowhere in particular does not beat its tail without a break;
+   * it gives a few beats and glides, and gives a few more.
+   */
+  glide: boolean;
+  /**
+   * Bending the front of the body round to look at something beside it,
+   * -1 to +1, without swimming off that way. Straightening again brings the
+   * head back.
+   */
+  look: number;
 }
 
 /** External stimuli the outside world hands to the brain. */
@@ -178,6 +191,15 @@ const SURFACE_REACH = 0.005;
 /** Peak inflow speed at the mouth during a strike, m/s. */
 const SUCTION_SPEED = 0.14;
 
+/** The fish turns round by folding, rather than steering, when its goal is further off its nose than this. Radians. */
+const TURN_FOLD_FROM = 0.5;
+/** How far ahead, in seconds, a hovering fish looks at its own rise or fall when trimming its bladder. */
+const BLADDER_LEAD = 3;
+/** How long the fold is given to form before the fish swims out of it, seconds. */
+const TURN_FOLD_TIME = 0.42;
+/** Where the middle of the fold has to get to for the whole of it to be off the tail, in body lengths. */
+const TURN_FOLD_OFF = TIP_S + FISH.curlWidth / 2 + 0.15;
+
 const scratch = {
   extremes: [v3(), v3(), v3(), v3(), v3(), v3()] as Vec3[],
   toTarget: v3(),
@@ -222,6 +244,8 @@ export class FishBrain {
     gillFlare: 0,
     mouthOpen: 0,
     hover: false,
+    glide: false,
+    look: 0,
   };
 
   intention: Intention = 'patrol';
@@ -252,6 +276,32 @@ export class FishBrain {
   private restTarget = v3();
   private yawRateFiltered = 0;
   private pitchRateFiltered = 0;
+
+  /**
+   * Turning round. 'fold': the body is curling and the head coming round.
+   * 'follow': the fish is swimming out along the curve while the fold runs
+   * down its body and off its tail.
+   */
+  private turnPhase: 'none' | 'fold' | 'follow' = 'none';
+  /** Exposed for diagnostics. */
+  get turnPhaseDebug(): string { return this.turnPhase; }
+  private turnTimer = 0;
+  private turnCurl = 0;
+  private turnFoldAt: number = FISH.curlAt;
+  private turnRest = 0;
+
+  /** What the fish is doing when it has nothing it needs to do. */
+  private idleMode: 'amble' | 'pause' = 'pause';
+  /** Exposed for diagnostics. */
+  get idleModeDebug(): string { return this.idleMode; }
+  private idleTimer = 1.5;
+  private ambleSpeed = 0.8;
+  private strokeTimer = 0;
+  private stroking = true;
+  private lookTimer = 3;
+  private lookHold = 0;
+  private lookCurl = 0;
+  private readonly pauseHeading = v3(0, 0, 1);
 
   /** Set when the fish takes a breath, so the world can make a bubble and ripples. */
   gulpedThisTick = false;
@@ -549,6 +599,9 @@ export class FishBrain {
     } else {
       de.avoid = 0;
     }
+    // A fish already turning round is already dealing with it, unless the
+    // glass is right there.
+    if (this.turnPhase !== 'none' && p.wallDistance > 0.012) de.avoid = 0;
 
     // 2. A fish that badly needs air surfaces even with a predator present,
     //    because it has to. This is a real hierarchy, not a tie-break.
@@ -605,7 +658,12 @@ export class FishBrain {
     // Having just swerved away from a wall, do not resume a course that pointed
     // straight into it. Without this the fish bounces along the glass, avoiding
     // and un-avoiding several times a second.
-    if (from === 'avoid') this.pickPatrolTarget();
+    //
+    // The new course is somewhere ahead of where the swerve has left the fish
+    // pointing, not the least-visited corner of the tank, which was usually
+    // behind it: every swerve was followed at once by a second turn, and the
+    // fish spent two thirds of its time turning round.
+    if (from === 'avoid') this.pickPatrolTarget(loco);
     switch (to) {
       case 'surface':
         this.surfacePhase = 'approach';
@@ -636,14 +694,37 @@ export class FishBrain {
   }
 
   /** Head for the least familiar corner of the tank. */
-  private pickPatrolTarget(): void {
+  private pickPatrolTarget(loco?: FishLocomotion): void {
     const g = this.grid;
     let worst = Infinity;
     let bestIdx = 0;
+    let hx = 0;
+    let hz = 0;
+    if (loco) {
+      loco.forward(scratch.fwd);
+      const h = Math.hypot(scratch.fwd.x, scratch.fwd.z) || 1;
+      hx = scratch.fwd.x / h;
+      hz = scratch.fwd.z / h;
+    }
     // A little noise on the comparison so the fish does not always visit the
     // cells in exactly the same order.
     for (let i = 0; i < this.familiarity.length; i++) {
-      const v = this.familiarity[i] + this.rng.range(0, 0.15);
+      let v = this.familiarity[i] + this.rng.range(0, 0.15);
+      if (loco) {
+        // A fish wanders on from where it is facing. Somewhere behind it has
+        // to be a good deal less familiar than somewhere ahead to be worth
+        // turning right round for, and somewhere a body length away is not
+        // worth setting out for at all.
+        const cx = TANK_MIN_X + (((i % g.nx) + 0.5) / g.nx) * TANK.width - loco.position.x;
+        const cz =
+          TANK_MIN_Z + ((Math.floor(i / (g.nx * g.ny)) + 0.5) / g.nz) * TANK.depth - loco.position.z;
+        const d = Math.hypot(cx, cz);
+        if (d > 1e-6) {
+          const cos = (cx * hx + cz * hz) / d;
+          v += 0.35 * (1 - cos) * 0.5;
+        }
+        if (d < 0.13) v += 0.4;
+      }
       if (v < worst) {
         worst = v;
         bestIdx = i;
@@ -652,11 +733,20 @@ export class FishBrain {
     const ix = bestIdx % g.nx;
     const iy = Math.floor(bestIdx / g.nx) % g.ny;
     const iz = Math.floor(bestIdx / (g.nx * g.ny));
+    // Somewhere in that cell, but not hard against the glass, the sand or
+    // the surface. The fish is seven centimetres long with its tail fin, and
+    // a spot three centimetres from a pane is one it can only reach by
+    // brushing the pane with its fins on the way in and again turning to
+    // leave. It was touching glass or sand about eighty times a minute.
     set(
       this.patrolTarget,
-      TANK_MIN_X + ((ix + 0.5) / g.nx) * TANK.width,
-      TANK.floorY + ((iy + 0.5) / g.ny) * (TANK.waterY - TANK.floorY),
-      TANK_MIN_Z + ((iz + 0.5) / g.nz) * TANK.depth,
+      clamp(TANK_MIN_X + ((ix + 0.5) / g.nx) * TANK.width, TANK_MIN_X + 0.055, TANK_MAX_X - 0.055),
+      clamp(
+        TANK.floorY + ((iy + 0.5) / g.ny) * (TANK.waterY - TANK.floorY),
+        TANK.floorY + 0.03,
+        TANK.waterY - 0.022,
+      ),
+      clamp(TANK_MIN_Z + ((iz + 0.5) / g.nz) * TANK.depth, TANK_MIN_Z + 0.055, TANK_MAX_Z - 0.055),
     );
   }
 
@@ -679,6 +769,8 @@ export class FishBrain {
     const g = this.goal;
     const p = this.percepts;
     g.hover = false;
+    g.glide = false;
+    g.look = 0;
     g.mouthOpen = 0;
     g.gillFlare = 0;
     this.gulpedThisTick = false;
@@ -956,13 +1048,114 @@ export class FishBrain {
 
       case 'patrol':
       default: {
-        if (dist(loco.position, this.patrolTarget) < 0.05) this.pickPatrolTarget();
-        copy(g.target, this.patrolTarget);
-        g.speedSL = 1.2;
-        g.urgency = 0.2;
-        g.finSpread = 0.65;
+        this.runIdle(loco, dt);
         break;
       }
+    }
+  }
+
+  /**
+   * Ordinary life: what the fish does when nothing is pressing.
+   *
+   * It used to swim, without a break, from one end of the tank to the other
+   * and back, and measured over five minutes it was never once still. A betta
+   * does not live like that, and a long-finned one least of all: its fins are
+   * a great deal of sail to drag about. It hangs in the water fanning its
+   * pectoral fins, looks at things, ambles a little way with a few beats of
+   * its tail and a glide, and hangs again. (How the time divides between the
+   * two is an estimate from watching them. No measured figure was to hand.)
+   */
+  private runIdle(loco: FishLocomotion, dt: number): void {
+    const g = this.goal;
+    this.idleTimer -= dt;
+
+    if (this.idleMode === 'pause') {
+      // Hang where it is, facing the way it was facing when it stopped.
+      set(
+        g.target,
+        loco.position.x + this.pauseHeading.x * 0.06,
+        this.patrolTarget.y,
+        loco.position.z + this.pauseHeading.z * 0.06,
+      );
+      g.speedSL = 0;
+      g.hover = true;
+      g.urgency = 0.1;
+      g.finSpread = 0.6;
+
+      // Every so often, bend round for a look to one side, hold it, and
+      // straighten up again.
+      this.lookTimer -= dt;
+      if (this.lookHold > 0) {
+        this.lookHold -= dt;
+        g.look = this.lookCurl;
+      } else if (this.lookTimer <= 0) {
+        this.lookTimer = this.rng.range(3, 9);
+        this.lookHold = this.rng.range(0.8, 2.2);
+        this.lookCurl = (this.rng.next() < 0.5 ? -1 : 1) * this.rng.range(0.2, 0.55);
+      }
+
+      // Not against the glass, though: a fish that has drifted up to a pane
+      // moves off.
+      // (The glass, not the sand: a betta hanging just over the bottom with
+      // its fins brushing it is a betta at rest.)
+      const snout = loco.bodyExtremes(scratch.extremes)[0];
+      const glass = Math.min(
+        Math.min(loco.position.x, snout.x) - TANK_MIN_X,
+        TANK_MAX_X - Math.max(loco.position.x, snout.x),
+        Math.min(loco.position.z, snout.z) - TANK_MIN_Z,
+        TANK_MAX_Z - Math.max(loco.position.z, snout.z),
+      );
+      if (this.idleTimer <= 0 || glass < 0.02) {
+        this.idleMode = 'amble';
+        // Long enough to get somewhere, not so long that a spot it cannot
+        // reach keeps it trying.
+        this.idleTimer = this.rng.range(6, 14);
+        this.ambleSpeed = this.rng.range(0.6, 1.1);
+        this.stroking = true;
+        this.strokeTimer = this.rng.range(0.8, 1.8);
+        this.lookHold = 0;
+        this.pickPatrolTarget(loco);
+      }
+      return;
+    }
+
+    // Ambling: a few beats, a glide, a few beats.
+    this.strokeTimer -= dt;
+    if (this.strokeTimer <= 0) {
+      this.stroking = !this.stroking;
+      this.strokeTimer = this.stroking ? this.rng.range(0.7, 1.7) : this.rng.range(0.5, 1.6);
+    }
+    copy(g.target, this.patrolTarget);
+    g.speedSL = this.ambleSpeed;
+    g.glide = !this.stroking;
+    g.urgency = 0.2;
+    g.finSpread = 0.65;
+
+    const arrived = dist(loco.position, this.patrolTarget) < 0.05;
+    // A spot close by and well off to one side is inside the circle the fish
+    // turns in, and it cannot get there by turning towards it: it goes round
+    // and round the spot instead. (Measured: the fish was turning fifteen
+    // times a minute, and most turns ended with the spot it wanted still
+    // seventy to a hundred degrees off its nose and ten centimetres away.)
+    // It gives that spot up and wanders on.
+    {
+      loco.forward(scratch.fwd);
+      const tx = this.patrolTarget.x - loco.position.x;
+      const tz = this.patrolTarget.z - loco.position.z;
+      const d = Math.hypot(tx, tz);
+      const h = Math.hypot(scratch.fwd.x, scratch.fwd.z) || 1;
+      const cos = d > 1e-6 ? (tx * scratch.fwd.x + tz * scratch.fwd.z) / (d * h) : 1;
+      if (!arrived && this.turnPhase === 'none' && d < 0.13 && cos < 0.5) this.pickPatrolTarget(loco);
+    }
+    if (arrived || this.idleTimer <= 0) {
+      this.idleMode = 'pause';
+      // Mostly a few seconds; now and then a long, still spell.
+      this.idleTimer = 2 + Math.min(22, -6 * Math.log(Math.max(1e-6, this.rng.next())));
+      this.lookTimer = this.rng.range(1.5, 5);
+      loco.forward(scratch.fwd);
+      const h = Math.hypot(scratch.fwd.x, scratch.fwd.z) || 1;
+      set(this.pauseHeading, scratch.fwd.x / h, 0, scratch.fwd.z / h);
+      this.patrolTarget.y = clamp(loco.position.y, TANK.floorY + 0.03, TANK.waterY - 0.022);
     }
   }
 
@@ -989,10 +1182,25 @@ export class FishBrain {
     // foraging or patrolling instead of having to *decide* to avoid the wall.
     // That is both how a real animal behaves and the only way the other drives
     // ever get a turn.
-    if (p.wallDistance < INTENTION.wallAvoidDistance * 2 && this.intention !== 'surface') {
+    //
+    // Sideways only. The sand counts as a wall, and in eight and a half
+    // centimetres of water the fish is within reach of it most of the time:
+    // pushed up from the sand as well, a fish with somewhere low to go was
+    // sent to the surface whenever it got down there and back down when it
+    // had risen, and went on bouncing between the two. The depth it may aim
+    // for is limited just below instead. And not while it is hanging still:
+    // the spot it is "heading for" then is only a way of saying which way it
+    // faces, and moving that spot turned the fish round and round.
+    const holding = g.hover && g.speedSL === 0 && this.intention === 'patrol';
+    if (
+      p.wallDistance < INTENTION.wallAvoidDistance * 2 &&
+      this.intention !== 'surface' &&
+      !holding
+    ) {
       const strength =
         smoothstep(INTENTION.wallAvoidDistance * 2, 0, p.wallDistance) * 0.09;
-      addScaled(g.target, p.wallAway, strength);
+      g.target.x += p.wallAway.x * strength;
+      g.target.z += p.wallAway.z * strength;
     }
 
     // Whatever a routine asked for, the place to go is inside the tank. A
@@ -1023,7 +1231,8 @@ export class FishBrain {
     // pivot on the spot beneath its food indefinitely. Behind is behind:
     // clamping also turned every target astern into one abeam.
     const horizontal = Math.hypot(scratch.local.x, scratch.local.z);
-    const yawError = horizontal > 0.25 ? Math.atan2(scratch.local.x, scratch.local.z) : 0;
+    const yawError =
+      horizontal > 0.25 && !holding ? Math.atan2(scratch.local.x, scratch.local.z) : 0;
     const pitchError = Math.asin(clamp(scratch.local.y, -1, 1));
 
     // Turning is a steady one-sided bend of the body, driven by a PD controller
@@ -1064,7 +1273,16 @@ export class FishBrain {
     // pitch error at a gain that made it the strongest vertical force the fish
     // had, and the fish rose and sank on its bladder with the tail switched off.
     const heightError = g.target.y - loco.position.y;
-    cmd.bladder = clamp(heightError / 0.03, -1, 1);
+    // A fish hanging in the water has nothing else to hold its depth with: the
+    // body's bend and the pectorals' tilt both work on water flowing past, and
+    // there is none. The bladder is slow (twelve seconds from empty to full),
+    // so steering it by the height error alone overshoots every time: measured,
+    // a pausing fish bobbed three centimetres up and down every three and a
+    // half seconds, at up to three quarters of a body length a second, and
+    // ended most pauses on the sand. So when hovering it is also told how
+    // fast the fish is already rising or sinking, and backs off early.
+    const hanging = g.hover || this.turnPhase !== 'none';
+    cmd.bladder = clamp((heightError - (hanging ? BLADDER_LEAD * loco.velocity.y : 0)) / 0.03, -1, 1);
     // The manoeuvring is done by swimming: the body pitches and the pectorals
     // angle, and the fish's own forward motion carries it up or down.
     //
@@ -1096,39 +1314,112 @@ export class FishBrain {
     // Forward speed, not total speed. Sinking is not swimming.
     const speedError = g.speedSL * turnPenalty - loco.forwardSpeedSL;
 
-    // A large turn is made on the spot with the pectorals, not on the move with
-    // the tail.
+    // Turning round.
     //
-    // The tail turns the fish by sweeping asymmetrically, and that only works
-    // with water flowing past the body: at a standstill a full one-sided sweep
-    // produces almost no yaw and almost no thrust. The failure this prevents was
-    // watched in detail: the fish, two centimetres from the glass with its
-    // target behind it, held full bend for five seconds while the speed
-    // controller wound the tail up to eight beats a second trying to reach a
-    // speed the bent tail could not deliver, drove itself into the glass, and
-    // was flung backwards at five body lengths a second. A betta turning round
-    // in a small tank pivots with its pectorals first, then swims off.
-    const pivoting = Math.abs(yawError) > 0.85;
+    // A fish that wants to face another way folds its body: the head comes
+    // round towards the tail, which stays where it was, because the tail and
+    // the long fins hold a great deal of water and the head holds very
+    // little. Then it swims out along the curve it has made, and the fold
+    // runs back along its body and off the end of its tail, the way a train
+    // goes round a bend. The fold has to run back no faster than the fish
+    // moves forward. If the fish simply straightened up where it was, the
+    // head would swing back as easily as it came round, and the turn would
+    // be undone. (Measured on the bare swimmer: a full fold brings the head
+    // round 106 degrees in half a second within a centimetre; unfolding on the
+    // spot gives all but 6 of them back; swimming out of it keeps 65 to 75.)
+    //
+    // What was here before was a slow beat of a bent tail with the pectorals
+    // out as brakes, meant as a turn on the spot. Measured, it turned the fish
+    // 23 degrees a second on a circle 36 centimetres across, in a tank 25 by
+    // 35. For nearly half its life the fish was in that turn, and it ended
+    // most of them against the glass.
+    this.turnRest = Math.max(0, this.turnRest - dt);
+    if (
+      this.turnPhase === 'none' &&
+      this.turnRest <= 0 &&
+      Math.abs(yawError) > TURN_FOLD_FROM &&
+      this.intention !== 'escape'
+    ) {
+      this.turnPhase = 'fold';
+      this.turnTimer = 0;
+      // The head comes round by about nine tenths of the fold, and the fish
+      // goes on turning for as long as it swims with the fold in it. Never
+      // more than three quarters of a full fold: past a right angle the tail
+      // points across the head's line and its beat drives the fish backwards
+      // (measured: a full fold swum out of went backwards at up to three body
+      // lengths a second first).
+      this.turnCurl =
+        Math.sign(yawError) * clamp(Math.abs(yawError) / (0.9 * FISH.curlMax), 0.25, 0.75);
+      this.turnFoldAt = FISH.curlAt;
+    }
+    if (this.turnPhase !== 'none' && this.intention === 'escape') {
+      // A fright interrupts anything.
+      this.turnPhase = 'none';
+      this.turnRest = 0.3;
+    }
+    const turning = this.turnPhase !== 'none';
+    if (this.turnPhase === 'fold') {
+      this.turnTimer += dt;
+      cmd.curl = this.turnCurl;
+      cmd.curlAt = FISH.curlAt;
+      if (this.turnTimer > TURN_FOLD_TIME) this.turnPhase = 'follow';
+    } else if (this.turnPhase === 'follow') {
+      // The fold runs back along the body and off the tail, slowly while the
+      // fish still has turning to do and quickly once it is facing where it
+      // means to go. While the fold is on the body the fish swims round a
+      // corner; running it off quickly straightens the fish but gives some
+      // of the turn back. (Measured on the bare swimmer, a 48 degree fold
+      // swum out of at 2.5 beats a second: run off at half a body length a
+      // second the fish ends up turned 85 degrees, at 0.9 it is 57, at 1.5
+      // it is 32.)
+      const left = yawError * Math.sign(this.turnCurl);
+      this.turnFoldAt += (0.45 + 0.95 * saturate(1 - left / 0.6)) * dt;
+      cmd.curl = this.turnCurl;
+      cmd.curlAt = this.turnFoldAt;
+      if (this.turnFoldAt > TURN_FOLD_OFF) {
+        this.turnPhase = 'none';
+        this.turnRest = 0.4;
+      }
+    }
+    if (this.turnPhase === 'none') {
+      // Not turning round: the fold is free for a sideways look, if the fish
+      // is having one.
+      cmd.curl = g.look;
+      cmd.curlAt = FISH.curlAt;
+    }
+    if (turning) {
+      cmd.bend = 0;
+      // A level turn. The up-and-down bend and the pectorals' tilt steer by
+      // the water running past the fish, and a fish folded round to turn has
+      // almost none running past it: what the bend does then is point the
+      // beating tail up or down. Measured in the tank: a fish turning with its
+      // goal four millimetres below it, bent fully to dive, climbed at nine
+      // centimetres a second, and the faster it climbed the harder it bent.
+      // Depth is left to the swim bladder until the fish is swimming again.
+      cmd.pitchBend = 0;
+      cmd.pectoralPitch *= saturate(loco.forwardSpeedSL);
+    }
 
-    if (pivoting) {
-      // A tail scull: a slow beat at full asymmetry, with the pectorals held out
-      // as brakes so the fish turns on the spot rather than swimming a wide
-      // arc. This is the turn a betta makes to face the other way in a small
-      // tank. The frequency is set, not integrated: the speed controller would
-      // otherwise wind the tail up trying to reach a speed the scull is not
-      // meant to produce.
-      //
-      // Three beats a second with the body curled to half its reflex range
-      // measured best: about thirty degrees a second on a ten-centimetre
-      // radius. Slower beats turn less; a tighter curl turns the body into a
-      // hoop and the beat stops working. The fish's own yaw inertia is small,
-      // but the water its flanks and fins must shove sideways to rotate is
-      // thirty-five times larger, and that is what sets the rate.
-      cmd.frequency = expApproach(cmd.frequency, 3.0, 6, dt);
-      cmd.amplitude = FISH.standardLength * FISH.tailAmplitudeRatio;
+    // The tail's beat is as wide as the fish needs and no wider: a fish that
+    // is not beating its tail holds it straight. It used to keep the full
+    // width with the beat stopped, which froze the body in an S, and a fish
+    // gliding with its body in an S does not glide straight.
+    const beatWidth = FISH.standardLength * FISH.tailAmplitudeRatio;
+
+    if (this.turnPhase === 'fold') {
+      // Fold first, then swim. The tail is still while the head comes round.
+      cmd.frequency = expApproach(cmd.frequency, 0, 8, dt);
+      cmd.amplitude = beatWidth * saturate(cmd.frequency / 0.5);
+      cmd.pectoralLeft = expApproach(cmd.pectoralLeft, 0.8, 4, dt);
+      cmd.pectoralRight = expApproach(cmd.pectoralRight, 0.8, 4, dt);
+    } else if (this.turnPhase === 'follow') {
+      // Swim out of it, gently: a beat or two a second is enough to carry the
+      // fish round the curve.
+      const beat = clamp(1.8 + 0.6 * g.speedSL, 2.2, 3.2);
+      cmd.frequency = expApproach(cmd.frequency, beat, 5, dt);
+      cmd.amplitude = beatWidth;
       cmd.pectoralLeft = expApproach(cmd.pectoralLeft, 0, 4, dt);
       cmd.pectoralRight = expApproach(cmd.pectoralRight, 0, 4, dt);
-      cmd.brake = expApproach(cmd.brake, 0.8, 8, dt);
     } else if (g.hover || g.speedSL < FISH.pectoralOnlySpeedSL) {
       // Slow work is done with the pectorals, which is what a hovering betta
       // actually uses. The tail stops.
@@ -1137,7 +1428,12 @@ export class FishBrain {
       // C-start, not a turn: the recoil kicks the head the *other* way and the
       // fish spins on the kick. The pectorals do the turning here.
       cmd.bend = expApproach(cmd.bend, 0, 8, dt);
-      const base = clamp(1.6 + speedError * 2.5, 0.4, FISH.maxPectoralHz);
+      // A fish that means to stay put fans its fins slowly; one creeping
+      // forwards rows.
+      const base =
+        g.speedSL === 0
+          ? clamp(0.9 + speedError * 4, 0.35, 1.2)
+          : clamp(1.6 + speedError * 2.5, 0.4, FISH.maxPectoralHz);
       // Differential beat turns the fish on the spot, and lets it back up —
       // bettas can swim backwards, and this falls out without extra machinery.
       // Rowing the fin on the -x side (index 0) yaws the fish towards +x, as
@@ -1147,7 +1443,14 @@ export class FishBrain {
       // the fish also creeps forwards, as a real one does.
       cmd.pectoralLeft = clamp(base * (1 + diff), 0, FISH.maxPectoralHz);
       cmd.pectoralRight = clamp(base * (1 - diff), 0, FISH.maxPectoralHz);
-      cmd.amplitude = FISH.standardLength * FISH.tailAmplitudeRatio * 0.4;
+      cmd.amplitude = beatWidth * saturate(cmd.frequency / 0.5);
+    } else if (g.glide) {
+      // Coasting between strokes: the tail stops, the pectorals stay folded,
+      // and nothing brakes.
+      cmd.frequency = expApproach(cmd.frequency, 0, 5, dt);
+      cmd.amplitude = beatWidth * saturate(cmd.frequency / 0.5);
+      cmd.pectoralLeft = expApproach(cmd.pectoralLeft, 0, 4, dt);
+      cmd.pectoralRight = expApproach(cmd.pectoralRight, 0, 4, dt);
     } else {
       // Winding the beat down is faster than winding it up: a fish can stop
       // driving instantly but cannot summon power instantly.
@@ -1165,20 +1468,22 @@ export class FishBrain {
       // Amplitude is nearly constant in real steady swimming — fish change speed
       // by changing frequency — and only opens up in a burst.
       const burst = this.intention === 'escape';
-      cmd.amplitude =
-        FISH.standardLength *
-        (burst ? FISH.burstAmplitudeRatio : FISH.tailAmplitudeRatio);
+      cmd.amplitude = burst
+        ? FISH.standardLength * FISH.burstAmplitudeRatio
+        : beatWidth * saturate(cmd.frequency / 0.5);
     }
 
-    // Brake when going faster than intended, and hard when much faster.
-    if (!pivoting) cmd.brake = expApproach(cmd.brake, saturate(-speedError * 0.8), 14, dt);
+    // Brake when going faster than intended, and hard when much faster. Not
+    // while coasting, which is meant to run on, nor while turning round.
+    const braking = turning || g.glide ? 0 : saturate(-speedError * 0.8);
+    cmd.brake = expApproach(cmd.brake, braking, 14, dt);
 
-    // A pivot gets a quarter of the reflex range of body curl: the camber is
-    // what points the tail's push sideways instead of backwards. Not more —
-    // at half the range the sweep reached thirteen millimetres at three beats
-    // a second and the reactive force on it was nineteen times the fish's
-    // weight, which is a C-start, not a turn. An escape keeps its own urgency.
-    cmd.agility = this.intention === 'escape' ? g.urgency : pivoting ? 0.25 : g.urgency;
+    // Only a fright bends the body at reflex speed. Measured on a fish at
+    // rest: a full bend at half urgency threw it backwards at three body
+    // lengths a second, and at full urgency at twelve, because the long fins
+    // are swung through the water like paddles. That belongs to an escape and
+    // to nothing else the fish does.
+    cmd.agility = this.intention === 'escape' ? g.urgency : Math.min(g.urgency, 0.25);
     cmd.finSpread = expApproach(cmd.finSpread, g.finSpread, 3.5, dt);
     cmd.gillFlare = expApproach(cmd.gillFlare, g.gillFlare, 5, dt);
     cmd.mouthOpen = expApproach(cmd.mouthOpen, g.mouthOpen, 18, dt);

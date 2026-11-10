@@ -185,6 +185,21 @@ export class FishLocomotion {
   private prevPecVnL = 0;
   private prevPecVnR = 0;
   private hasPrevVn = false;
+  /**
+   * Momentum, and angular momentum about the centre of mass, of the water a
+   * change of posture is carrying: body frame, last substep.
+   */
+  private readonly prevWaterP = v3();
+  /**
+   * The mass the water gives a curled fish for moving sideways, forwards and
+   * turning, as the upper half of a symmetric matrix.
+   */
+  private readonly curlMass = new Float64Array(6);
+  /** The momentum of a curled fish and the water it carries: in the room, and about the vertical. */
+  private readonly curlMomentum = v3();
+  private curlSpin = 0;
+  private wasCurled = false;
+  private readonly prevWaterL = v3();
 
   /** Force breakdown from the most recent substep. Diagnostics only. */
   readonly forces: ForceBreakdown = {
@@ -445,11 +460,29 @@ export class FishLocomotion {
       quatRotate(w.t, this.orientation, st.tangent);
 
       w.wFull = dot(scratch.rel, w.n);
-      w.wDeform = dot(scratch.tmp, w.n);
-      // Bending plus translation, without the rigid rotation.
-      add(scratch.tmp2, scratch.tmp, this.velocity);
-      if (flow) sub(scratch.tmp2, scratch.tmp2, scratch.flow);
-      w.wSlender = dot(scratch.tmp2, w.n);
+      // The beat alone, without whatever the change of posture added: that
+      // part is handled on its own after the loop, and must not be counted
+      // twice.
+      w.wDeform =
+        (st.velLocal.x - st.velPosture.x) * st.normal.x +
+        (st.velLocal.y - st.velPosture.y) * st.normal.y +
+        (st.velLocal.z - st.velPosture.z) * st.normal.z;
+      // The beat plus the fish's travel, without the rigid rotation and
+      // without any change of posture. This feeds the term that follows the
+      // water as it slides back along the body, which is Lighthill's for a
+      // wave on a nearly straight body. A change of posture is not part of
+      // that wave: its water is accounted for after the loop.
+      //
+      // The travel is resolved against the way each slice really faces, curl
+      // and all. That is what lets a folded fish steer the water running
+      // along it, as a rudder does, and so swim round a corner. For a while
+      // the curl was taken out here, and a fish swimming out of a fold skidded
+      // sideways and kept less than half of its turn (measured: a 48 degree
+      // fold swum out of at 2.5 beats a second kept 43 degrees without this
+      // and 85 with it).
+      if (flow) sub(scratch.tmp2, this.velocity, scratch.flow);
+      else copy(scratch.tmp2, this.velocity);
+      w.wSlender = w.wDeform + dot(scratch.tmp2, w.n);
       w.vt = dot(scratch.rel, w.t);
     }
 
@@ -529,6 +562,77 @@ export class FishLocomotion {
       cross(scratch.tmp2, w.rWorld, scratch.tmp);
       add(T, T, scratch.tmp2);
     }
+
+    // --- The water a change of posture carries ---
+    //
+    // The term above, -ma * dw/dt along each slice's own normal, is Lighthill's
+    // and is right for the beat: a small wave running down a nearly straight
+    // body. It is not right for the fish curling up to turn, or starting and
+    // stopping its beat. Those swing the slices' normals through large angles,
+    // and a force applied along a direction that turns while it acts does not
+    // add up to zero over a movement that begins and ends at rest. Measured,
+    // with the drag switched off so nothing could hide it: a fish that curled
+    // to its steering limit in a tenth of a second and then held still was
+    // left turning at eighty degrees a second, away from the side it had
+    // curled towards, and sliding sideways, for good. With drag it showed up
+    // as a head that swung the wrong way whenever the fish bent, which is why
+    // the fish could not turn by bending — and bending is how a fish turns.
+    //
+    // So the part of the body's motion that is a change of posture is handled
+    // through the momentum of the water it moves, ma * w * n summed over the
+    // body, and that water's angular momentum about the centre of mass. The
+    // force is minus the rate of change of the first and the torque minus the
+    // rate of change of the second. Differenced like that, whatever the water
+    // is given while the body moves it gives back when the body stops: curl
+    // and hold, and the fish ends up at rest, turned towards the curl.
+    let px = 0;
+    let py = 0;
+    let pz = 0;
+    let lx = 0;
+    let ly = 0;
+    let lz = 0;
+    for (let i = 0; i < n; i++) {
+      const st = states[i];
+      const m = segs[i].addedMassPerLength * segs[i].ds;
+      const w =
+        st.velPosture.x * st.normal.x + st.velPosture.y * st.normal.y + st.velPosture.z * st.normal.z;
+      const qx = m * w * st.normal.x;
+      const qy = m * w * st.normal.y;
+      const qz = m * w * st.normal.z;
+      px += qx;
+      py += qy;
+      pz += qz;
+      lx += st.pos.y * qz - st.pos.z * qy;
+      ly += st.pos.z * qx - st.pos.x * qz;
+      lz += st.pos.x * qy - st.pos.y * qx;
+    }
+    if (this.hasPrevVn) {
+      // The momentum is reckoned in the fish's own frame, which is itself
+      // turning; the last three terms are the turning of the frame.
+      quatRotateInv(scratch.tmp, this.orientation, this.angularVelocity);
+      const ox = scratch.tmp.x;
+      const oy = scratch.tmp.y;
+      const oz = scratch.tmp.z;
+      set(
+        scratch.tmp2,
+        -(px - this.prevWaterP.x) * invDt - (oy * pz - oz * py),
+        -(py - this.prevWaterP.y) * invDt - (oz * px - ox * pz),
+        -(pz - this.prevWaterP.z) * invDt - (ox * py - oy * px),
+      );
+      quatRotate(scratch.tmp, this.orientation, scratch.tmp2);
+      add(this.forces.reactive, this.forces.reactive, scratch.tmp);
+      add(F, F, scratch.tmp);
+      set(
+        scratch.tmp2,
+        -(lx - this.prevWaterL.x) * invDt,
+        -(ly - this.prevWaterL.y) * invDt,
+        -(lz - this.prevWaterL.z) * invDt,
+      );
+      quatRotate(scratch.tmp, this.orientation, scratch.tmp2);
+      add(T, T, scratch.tmp);
+    }
+    set(this.prevWaterP, px, py, pz);
+    set(this.prevWaterL, lx, ly, lz);
     this.hasPrevVn = true;
   }
 
@@ -707,10 +811,24 @@ export class FishLocomotion {
     // in reality the body sweeping sideways through water damps rotation hard.
     // Coefficient from integrating cross-flow drag over the body for a unit
     // angular rate, linearised about the current rate.
-    const wl = len(this.angularVelocity);
+    //
+    // The rate that is damped is the rate the finned part of the fish is
+    // turning at, which is where the factor's weight lies. On a fish holding
+    // its shape that is simply how fast the fish is turning. On a fish curling
+    // up it is not: the head comes round while the fins and the water they
+    // hold stay nearly where they were, and damping the head as though it were
+    // swinging the fins with it left the fish unable to turn its head at all.
+    const finTurn = this.body.finTurnRate;
+    if (finTurn !== 0) {
+      quatRotate(scratch.tmp2, this.orientation, AXIS_Y);
+      addScaled(copy(scratch.r, this.angularVelocity), scratch.tmp2, finTurn);
+    } else {
+      copy(scratch.r, this.angularVelocity);
+    }
+    const wl = len(scratch.r);
     if (wl > 1e-6) {
       const cRot = 0.5 * RHO_WATER * FISH.crossFlowCd * this.rotationalDragFactor;
-      scale(scratch.tmp, this.angularVelocity, -cRot * wl);
+      scale(scratch.tmp, scratch.r, -cRot * wl);
       add(T, T, scratch.tmp);
     }
     // And the viscous part, linear in the rate, which is what actually stops a
@@ -719,7 +837,7 @@ export class FishLocomotion {
     {
       const [Ipitch, Iyaw, Iroll] = this.morphology.effectiveInertiaBody;
       const k = 1 / FISH.rotationalViscousTau;
-      quatRotateInv(scratch.tmp, this.orientation, this.angularVelocity);
+      quatRotateInv(scratch.tmp, this.orientation, scratch.r);
       set(scratch.tmp, -Ipitch * k * scratch.tmp.x, -Iyaw * k * scratch.tmp.y, -Iroll * k * scratch.tmp.z);
       quatRotate(scratch.tmp2, this.orientation, scratch.tmp);
       add(T, T, scratch.tmp2);
@@ -754,8 +872,41 @@ export class FishLocomotion {
     quatRotate(scratch.axisF, this.orientation, AXIS_Z);
     quatRotate(scratch.axisU, this.orientation, AXIS_Y);
     quatRotate(scratch.axisR, this.orientation, AXIS_X);
-    addScaled(copy(out[0], this.position), scratch.axisF, reachForward);
-    addScaled(copy(out[1], this.position), scratch.axisF, -reachBack);
+    // The snout and the tip of the tail are where the body really has them,
+    // not straight ahead and straight behind. On a fish folded round to turn
+    // the two are far apart: taking the tail as straight behind the head, a
+    // fish that lay along the glass and turned its head away from it swung a
+    // tail that was not there through the pane, and the glass threw the fish
+    // across the tank at the speed limit (measured: pushes of up to eleven
+    // times the fish's weight, in open water, at the start of a turn).
+    const states = this.body.segments;
+    //
+    // And the hind end is the end of the body, where the tail fin is rooted,
+    // not the tip of the fin. The fin is cloth: pressed on the glass it folds
+    // (fins.ts folds the drawn fin the same way) and passes nothing on to the
+    // fish. Treated as stiff, the tip of the tail tapping a pane threw the
+    // whole fish off it at four to five body lengths a second, because the
+    // fish weighs next to nothing along its own length, and a fish turning
+    // round beside a pane has nowhere else to put its tail (measured: sixteen
+    // such throws in two hundred seconds, every one with the tail on a pane
+    // and the fish's centre one to two centimetres from it).
+    const head = states[0].pos;
+    const rootIndex = states.length - 1 - FISH.caudalSegments;
+    const tip = states[rootIndex].pos;
+    const beforeTip = states[rootIndex - 1].pos;
+    if (reachForward > 0 && reachBack > 0) {
+      set(scratch.tmp, head.x, head.y, head.z + reachForward - (m.comArc - m.segments[0].arc));
+      quatRotate(scratch.tmp2, this.orientation, scratch.tmp);
+      add(out[0], this.position, scratch.tmp2);
+      set(
+        scratch.tmp,
+        tip.x + (tip.x - beforeTip.x) * 0.5,
+        tip.y + (tip.y - beforeTip.y) * 0.5,
+        tip.z + (tip.z - beforeTip.z) * 0.5,
+      );
+      quatRotate(scratch.tmp2, this.orientation, scratch.tmp);
+      add(out[1], this.position, scratch.tmp2);
+    }
     addScaled(copy(out[2], this.position), scratch.axisU, reachUp);
     addScaled(copy(out[3], this.position), scratch.axisU, -reachDown);
     addScaled(copy(out[4], this.position), scratch.axisR, reachSide);
@@ -843,9 +994,78 @@ export class FishLocomotion {
     // immediately readable as wrong.
     quatRotateInv(scratch.bodyF, this.orientation, F);
     const [mSurge, mSway, mHeave] = this.morphology.effectiveMass;
-    const ax = scratch.bodyF.x / mSway;
+    let ax = scratch.bodyF.x / mSway;
     const ay = scratch.bodyF.y / mHeave;
-    const az = scratch.bodyF.z / mSurge;
+    let az = scratch.bodyF.z / mSurge;
+    // A curled fish is not the dart those three numbers describe. See
+    // FishBody.curlWater: the sideways and forward directions are no longer
+    // independent, so the two are solved together.
+    //
+    // And the water the curl carries changes as the fish folds, so what is
+    // conserved from one step to the next is the momentum, mass times
+    // velocity, not the velocity. Carrying the velocity over lets a fish pick
+    // up speed while its tail fin is still edge-on and light, and keep that
+    // speed once the fin has swung broadside and is carrying fifteen times the
+    // water: it folded up and left at five body lengths a second.
+    const cw = this.body.curlWater;
+    const curled = cw.active || this.wasCurled;
+    let yawAccel = 0;
+    if (curled) {
+      const m = this.morphology.totalMass;
+      const M = this.curlMass;
+      // Sideways, forwards and turning, taken together: [x, z, yaw].
+      M[0] = cw.active ? m + cw.xx : mSway;
+      M[1] = cw.active ? cw.xz : 0;
+      M[2] = cw.active ? cw.xYaw : 0;
+      M[3] = cw.active ? mSurge + cw.zz : mSurge;
+      M[4] = cw.active ? cw.zYaw : 0;
+      M[5] = cw.active
+        ? this.morphology.inertia[2] + cw.yaw
+        : this.morphology.effectiveInertiaBody[1];
+      quatRotateInv(scratch.tmp, this.orientation, this.velocity);
+      quatRotateInv(scratch.tmp2, this.orientation, this.angularVelocity);
+      quatRotateInv(scratch.bodyT, this.orientation, T);
+      const vx = scratch.tmp.x;
+      const vy = scratch.tmp.y;
+      const vz = scratch.tmp.z;
+      const wy = scratch.tmp2.y;
+      // Momentum after this step: what there was, plus what the forces add.
+      // What there was is kept as a direction in the room, not in the fish,
+      // because the fish turns between one step and the next and the water's
+      // momentum does not turn with it.
+      let p0: number;
+      let p1: number;
+      let p2: number;
+      if (this.wasCurled) {
+        quatRotateInv(scratch.tmp, this.orientation, this.curlMomentum);
+        p0 = scratch.tmp.x;
+        p1 = scratch.tmp.z;
+        p2 = this.curlSpin;
+      } else {
+        // Starting out: the fish keeps the speed it has, and the momentum is
+        // whatever that speed comes to with the water it is carrying now.
+        p0 = M[0] * vx + M[1] * vz + M[2] * wy;
+        p1 = M[1] * vx + M[3] * vz + M[4] * wy;
+        p2 = M[2] * vx + M[4] * vz + M[5] * wy;
+      }
+      p0 += scratch.bodyF.x * dt;
+      p1 += scratch.bodyF.z * dt;
+      p2 += scratch.bodyT.y * dt;
+      // Solve the symmetric three-by-three for the new velocities.
+      const c00 = M[3] * M[5] - M[4] * M[4];
+      const c01 = M[2] * M[4] - M[1] * M[5];
+      const c02 = M[1] * M[4] - M[2] * M[3];
+      const c11 = M[0] * M[5] - M[2] * M[2];
+      const c12 = M[1] * M[2] - M[0] * M[4];
+      const c22 = M[0] * M[3] - M[1] * M[1];
+      const det = M[0] * c00 + M[1] * c01 + M[2] * c02;
+      ax = ((c00 * p0 + c01 * p1 + c02 * p2) / det - vx) / dt;
+      az = ((c01 * p0 + c11 * p1 + c12 * p2) / det - vz) / dt;
+      yawAccel = ((c02 * p0 + c12 * p1 + c22 * p2) / det - wy) / dt;
+      set(scratch.tmp, p0, mHeave * (vy + ay * dt), p1);
+      quatRotate(this.curlMomentum, this.orientation, scratch.tmp);
+      this.curlSpin = p2;
+    }
     set(scratch.tmp, ax, ay, az);
     quatRotate(scratch.tmp2, this.orientation, scratch.tmp);
     addScaled(this.velocity, scratch.tmp2, dt);
@@ -872,6 +1092,8 @@ export class FishLocomotion {
       (scratch.bodyT.y - gy) / Iy,
       (scratch.bodyT.z - gz) / Iz,
     );
+    if (curled) scratch.tmp2.y = yawAccel;
+    this.wasCurled = cw.active;
     // Bound the angular acceleration to something an animal can produce. A
     // C-start in a fish this size reaches about 20 rad/s in 20 ms, so roughly
     // 1000 rad/s^2; twice that is beyond anything real, and anything beyond it
