@@ -41,7 +41,7 @@ import {
   expApproach,
 } from './math.js';
 import { FISH, PECTORAL } from './config.js';
-import { Morphology, amplitudeEnvelope, bendShape } from './morphology.js';
+import { Morphology, TIP_S, amplitudeEnvelope, bendShape } from './morphology.js';
 
 /** Number of dense samples used before arc-length resampling. */
 const DENSE = 120;
@@ -57,6 +57,13 @@ export interface BodySegmentState {
   up: Vec3;
   /** Velocity of this point in the body frame, from deformation alone. */
   velLocal: Vec3;
+  /**
+   * The part of that velocity that comes from the fish changing its posture
+   * (how hard it is beating, how far it is curled) rather than from the beat
+   * itself running along the body. The water treats the two differently; see
+   * the reactive force in locomotion.ts.
+   */
+  velPosture: Vec3;
 }
 
 /** The muscle command the brain sends down. Nothing here is a velocity. */
@@ -79,6 +86,28 @@ export interface MotorCommand {
    * the last few millimetres.
    */
   pitchBend: number;
+  /**
+   * How far the fish curls its whole body round to one side, -1 to +1, same
+   * sign as `bend`.
+   *
+   * This is the turn a fish makes when it wants to face another way rather
+   * than adjust its course: the body folds into a C, the head comes round
+   * towards the tail, and the fish swims out along the curve. `bend` cannot do
+   * it. It leans the tail a centimetre or so off the line, which steers a
+   * moving fish round a circle wider than the tank and does nothing for one
+   * that is standing still. A betta turning round in its own length is bent
+   * through more than a right angle. See FISH.curlMax.
+   */
+  curl: number;
+  /**
+   * Where along the body the middle of the curl sits, in body lengths from
+   * the snout. Left at FISH.curlAt the fish folds about its middle. Slid back
+   * towards and past the tail, the fold runs down the body and off the end of
+   * the tail fin, leaving the fish straight and facing the way its head had
+   * turned. That is how a turn is finished. Simply unfolding again would undo
+   * it, swinging the head back to where it started.
+   */
+  curlAt: number;
   /** Left and right pectoral beat frequency, Hz. */
   pectoralLeft: number;
   pectoralRight: number;
@@ -134,12 +163,24 @@ export interface MotorCommand {
   agility: number;
 }
 
+/**
+ * How much of the full curl the body has turned through by position `s` (in
+ * body lengths from the snout), with the fold centred at `at`: 0 ahead of the
+ * fold, 1 behind it.
+ */
+export function curlProfile(s: number, at: number): number {
+  const t = Math.max(0, Math.min(1, (s - at) / FISH.curlWidth + 0.5));
+  return t * t * (3 - 2 * t);
+}
+
 export function createMotorCommand(): MotorCommand {
   return {
     frequency: 0,
     amplitude: FISH.standardLength * FISH.tailAmplitudeRatio,
     bend: 0,
     pitchBend: 0,
+    curl: 0,
+    curlAt: FISH.curlAt,
     pectoralLeft: 0,
     pectoralRight: 0,
     pectoralPitch: 0,
@@ -171,6 +212,10 @@ export class FishBody {
   /** Previous body-frame positions, for the deformation velocity. */
   private readonly prevPos: Vec3[] = [];
   private hasPrev = false;
+  /** Where each point would be had only the beat moved on, with the posture held. */
+  private readonly beatOnly: Vec3[] = [];
+  /** The segments' own position vectors, in order, for layout() to fill. */
+  private readonly livePos: Vec3[] = [];
 
   /** Internal angular momentum from the last step, for the recoil torque. */
   private prevInternalL = v3();
@@ -196,9 +241,60 @@ export class FishBody {
   private actualPitchBend = 0;
   private actualFrequency = 0;
   private actualAgility = 0;
+  private actualCurl = 0;
+  private curlRate = 0;
+  private actualCurlAt: number = FISH.curlAt;
+
+  /**
+   * How the curl changes the water the fish has to move to get going.
+   *
+   * A straight fish moving sideways shoves a great slab of water with its
+   * flanks and fins, and moving forwards almost none. Curl the fish and that is
+   * no longer true of the curled part: a tail fin folded round to stand across
+   * the head's line is broadside to the fish's forward motion. These are the
+   * sums that say so, over the curled centreline alone (no beat): the mass of
+   * water carried along the fish's sideways axis, along its forward axis, the
+   * mix of the two, and the same for turning about the vertical.
+   *
+   * Without them the curl is a catapult. The fin, sweeping round with a couple
+   * of grams of water, pushed on a fish that was still being treated as a dart
+   * that weighs two grams end-on, and a fish folding up to turn round shot
+   * across the tank at the speed limit.
+   */
+  readonly curlWater = { xx: 0, xz: 0, zz: 0, yaw: 0, xYaw: 0, zYaw: 0, active: false };
+  private curlWaterFor = 0;
+  private curlWaterSteer = 0;
+  /** Each segment's share of the fish's resistance to turning; sums to one. */
+  private readonly finWeight: Float64Array;
+  private finTurn = 0;
+  private curlWaterAt = 0;
+  /**
+   * How fast the curl is turning the finned part of the fish relative to its
+   * head, radians a second, about the fish's own vertical. The fins are what
+   * the water grips when the fish turns, so the drag on turning goes by how
+   * fast they are turning, and while the fish is curling that is not how fast
+   * its head is.
+   */
+  get finTurnRate(): number {
+    return this.finTurn;
+  }
+  /** The angle the curl has turned the body through at each segment, radians. */
+  readonly curlAngle: Float64Array;
+  private readonly curlPos: Vec3[] = [];
 
   constructor(morphology: Morphology) {
     this.morphology = morphology;
+    this.curlAngle = new Float64Array(morphology.segments.length);
+    {
+      this.finWeight = new Float64Array(morphology.segments.length);
+      let sum = 0;
+      morphology.segments.forEach((seg, i) => {
+        const r = Math.abs(seg.arc - morphology.comArc);
+        this.finWeight[i] = seg.lateralArea * r * r * r;
+        sum += this.finWeight[i];
+      });
+      for (let i = 0; i < this.finWeight.length; i++) this.finWeight[i] /= sum;
+    }
     for (let i = 0; i < morphology.segments.length; i++) {
       this.segments.push({
         pos: v3(),
@@ -206,8 +302,12 @@ export class FishBody {
         normal: v3(1, 0, 0),
         up: v3(0, 1, 0),
         velLocal: v3(),
+        velPosture: v3(),
       });
       this.prevPos.push(v3());
+      this.beatOnly.push(v3());
+      this.livePos.push(this.segments[i].pos);
+      this.curlPos.push(v3());
     }
     // Start straight so the first step has a sane previous state.
     this.shape(createMotorCommand(), 0);
@@ -221,12 +321,12 @@ export class FishBody {
    * snout sits near z = 0 and the tail near z = -SL, before the centroid shift.
    */
   shape(cmd: MotorCommand, dt: number): void {
-    const L = this.morphology.standardLength;
-    // The chain runs past the body: the last segments are the caudal fin.
-    const totalArc = this.morphology.totalArc;
-    const lambda = FISH.waveLengthRatio * L;
-    const k = (2 * Math.PI) / lambda; // spatial wavenumber, rad per metre of arc
-
+    const prevAmplitude = this.actualAmplitude;
+    const prevBend = this.actualBend;
+    const prevPitchBend = this.actualPitchBend;
+    const prevAgility = this.actualAgility;
+    const prevCurl = this.actualCurl;
+    const prevCurlAt = this.actualCurlAt;
     if (dt > 0) {
       // Muscle slew limits. Amplitude relaxes over about 60 ms; bend can change
       // faster, because a startled fish's C-start really does begin within
@@ -248,6 +348,53 @@ export class FishBody {
       // the other inside a single tail beat.
       const agility = Math.max(0, Math.min(1, cmd.agility));
       this.actualAgility = expApproach(this.actualAgility, agility, 1 / 0.05, dt);
+      // The curl is driven like a weight on a damped spring rather than eased
+      // straight towards its target, so that it starts moving from rest and
+      // comes to rest again. Easing straight towards the target starts at full
+      // speed on the first step, and every part of the body the curl moves
+      // would then hit the water at that speed from standing.
+      {
+        const w = FISH.curlQuickness;
+        // A fold asked for beyond the end of the tail is no fold at all.
+        // (Without this, a fold that had just run off the tail was started
+        // again at the middle of the body for the few steps the brain went
+        // on asking for it.)
+        const asked = Math.max(-1, Math.min(1, cmd.curl));
+        // Nor can a fold be brought back up the body towards the head: that
+        // cracks the tail fin like a whip (measured: it threw the fish at up
+        // to ten body lengths a second). A new fold asked for while an old
+        // one is still partway down the tail waits for the old one to relax.
+        const headward =
+          cmd.curlAt < this.actualCurlAt - 0.05 && Math.abs(this.actualCurl) > 0.01;
+        const target = curlProfile(TIP_S, cmd.curlAt) === 0 || headward ? 0 : asked;
+        this.curlRate += (w * w * (target - this.actualCurl) - 2 * w * this.curlRate) * dt;
+        this.actualCurl += this.curlRate * dt;
+        const offTheTail = curlProfile(TIP_S, this.actualCurlAt) === 0;
+        if (offTheTail || (Math.abs(this.actualCurl) <= 0.01 && target === 0)) {
+          // Nothing, or next to nothing, of the fold is left on the body, so
+          // the numbers can be put back to the start without moving anything.
+          this.actualCurl = 0;
+          this.curlRate = 0;
+          this.actualCurlAt = Math.min(cmd.curlAt, FISH.curlAt);
+        } else if (asked !== 0 && !headward) {
+          // The fold travels down the body at a steady pace, no faster than
+          // FISH.curlTravel body lengths a second. (While the fish is
+          // straightening out, the fold stays where it is: sliding it back up
+          // the body would fold the fish again.)
+          //
+          // Eased as well as limited. The brain moves its command once a
+          // frame, and a fold that jumped along the body once a frame and
+          // then stood still for three steps out of four was moving, when it
+          // moved, at four times its average speed. Drag goes as the square
+          // of speed, so the tail met four times the drag as the fold ran
+          // off it, and that drag is what swings the head back: turns that
+          // kept four fifths of their angle when commanded every step kept
+          // a quarter when commanded every frame.
+          const step = FISH.curlTravel * dt;
+          const want = expApproach(this.actualCurlAt, cmd.curlAt, 1 / 0.07, dt) - this.actualCurlAt;
+          this.actualCurlAt += Math.max(-step, Math.min(step, want));
+        }
+      }
       const bendTau = 0.120 + (0.015 - 0.120) * agility;
       this.actualBend = expApproach(this.actualBend, bendX, 1 / bendTau, dt);
       this.actualPitchBend = expApproach(this.actualPitchBend, bendY, 1 / (bendTau * 2.5), dt);
@@ -261,62 +408,48 @@ export class FishBody {
       this.actualPitchBend = cmd.pitchBend;
       this.actualFrequency = cmd.frequency;
       this.actualAgility = cmd.agility;
+      this.actualCurl = cmd.curl;
+      this.curlRate = 0;
+      this.actualCurlAt = cmd.curlAt;
     }
 
-    // --- 1. Dense sample of the laterally offset centreline ---
-    let minX = Infinity;
-    let maxX = -Infinity;
-    for (let j = 0; j <= DENSE; j++) {
-      const arc = (j / DENSE) * totalArc;
-      // s is measured in body lengths, so it runs past 1 over the caudal fin and
-      // the amplitude envelope keeps growing — which is what makes the fin's
-      // trailing edge the biggest-amplitude part of the animal.
-      const s = arc / L;
-      const env = amplitudeEnvelope(s) * this.actualAmplitude;
-      const theta = k * arc - this.wavePhase;
-      const wave = Math.sin(theta);
-      const steer = this.actualBend * (1 + FISH.bendReflexGain * this.actualAgility);
-      // Three things at once in a turn: the ordinary wave; the same wave beaten
-      // harder to one side (sin^2 is one-signed and largest at the extremes, so
-      // it is an amplitude asymmetry rather than a shift — see bendAsymmetry);
-      // and a camber of the whole body into the turn, which is the rudder.
-      const h =
-        env * wave +
-        steer * (FISH.bendAsymmetry * env * wave * wave + bendShape(s));
-      this.denseX[j] = h;
-      // Vertical bend. Gentler than the lateral one — a fish is far stiffer in
-      // that plane, which is why it turns much more readily than it climbs.
-      this.denseY[j] = this.actualPitchBend * bendShape(s) * 0.55;
-      this.denseZ[j] = -arc;
-      if (h < minX) minX = h;
-      if (h > maxX) maxX = h;
-    }
-    this.tailExcursion = Math.abs(this.denseX[DENSE]);
-
-    // --- 2. Cumulative arc length along that curve ---
-    this.denseArc[0] = 0;
-    for (let j = 1; j <= DENSE; j++) {
-      const dx = this.denseX[j] - this.denseX[j - 1];
-      const dy = this.denseY[j] - this.denseY[j - 1];
-      const dz = this.denseZ[j] - this.denseZ[j - 1];
-      this.denseArc[j] = this.denseArc[j - 1] + Math.sqrt(dx * dx + dy * dy + dz * dz);
-    }
-
-    // --- 3. Resample at uniform arc length, so the body cannot stretch ---
     const segs = this.morphology.segments;
     const n = segs.length;
-    let cursor = 0;
-    for (let i = 0; i < n; i++) {
-      const targetArc = segs[i].arc; // distance from the snout along the body
-      while (cursor < DENSE && this.denseArc[cursor + 1] < targetArc) cursor++;
-      const a0 = this.denseArc[cursor];
-      const a1 = this.denseArc[Math.min(cursor + 1, DENSE)];
-      const t = a1 > a0 ? (targetArc - a0) / (a1 - a0) : 0;
-      const j1 = Math.min(cursor + 1, DENSE);
-      const x = this.denseX[cursor] + (this.denseX[j1] - this.denseX[cursor]) * t;
-      const y = this.denseY[cursor] + (this.denseY[j1] - this.denseY[cursor]) * t;
-      const z = this.denseZ[cursor] + (this.denseZ[j1] - this.denseZ[cursor]) * t;
-      set(this.segments[i].pos, x, y, z);
+
+    // --- 1 to 3 and 5. Lay the body out, centred on its centre of mass ---
+    this.tailExcursion = this.layout(
+      this.actualAmplitude,
+      this.actualBend,
+      this.actualPitchBend,
+      this.actualAgility,
+      this.actualCurl,
+      this.actualCurlAt,
+      this.wavePhase,
+      this.livePos,
+    );
+
+    // The same instant of the beat with the posture the fish had a step ago.
+    // The difference between the two is what the change of posture alone did.
+    const postureMoved =
+      dt > 0 &&
+      (Math.abs(this.actualAmplitude - prevAmplitude) > 1e-12 ||
+        Math.abs(this.actualBend - prevBend) > 1e-12 ||
+        Math.abs(this.actualPitchBend - prevPitchBend) > 1e-12 ||
+        Math.abs(this.actualAgility - prevAgility) > 1e-12 ||
+        Math.abs(this.actualCurl - prevCurl) > 1e-12 ||
+        Math.abs(this.actualCurlAt - prevCurlAt) > 1e-12);
+    this.updateCurlWater(dt);
+    if (postureMoved) {
+      this.layout(
+        prevAmplitude,
+        prevBend,
+        prevPitchBend,
+        prevAgility,
+        prevCurl,
+        prevCurlAt,
+        this.wavePhase,
+        this.beatOnly,
+      );
     }
 
     // --- 4. Frames: tangent along the body, normal sideways, up = t x n ---
@@ -374,29 +507,6 @@ export class FishBody {
       normalize(this.segments[i].up, this.segments[i].up);
     }
 
-    // --- 5. Shift so the mass-weighted centroid is at the body-frame origin ---
-    //
-    // Without this the fish would translate itself by wiggling, with no water
-    // involved. See the note at the top of this file.
-    let cx = 0;
-    let cy = 0;
-    let cz = 0;
-    const M = this.morphology.totalMass;
-    for (let i = 0; i < n; i++) {
-      const m = segs[i].mass;
-      cx += this.segments[i].pos.x * m;
-      cy += this.segments[i].pos.y * m;
-      cz += this.segments[i].pos.z * m;
-    }
-    cx /= M;
-    cy /= M;
-    cz /= M;
-    for (let i = 0; i < n; i++) {
-      this.segments[i].pos.x -= cx;
-      this.segments[i].pos.y -= cy;
-      this.segments[i].pos.z -= cz;
-    }
-
     // --- 6. Deformation velocity, and the recoil torque it implies ---
     if (dt > 0 && this.hasPrev) {
       const invDt = 1 / dt;
@@ -408,6 +518,13 @@ export class FishBody {
         seg.velLocal.x = (seg.pos.x - this.prevPos[i].x) * invDt;
         seg.velLocal.y = (seg.pos.y - this.prevPos[i].y) * invDt;
         seg.velLocal.z = (seg.pos.z - this.prevPos[i].z) * invDt;
+        if (postureMoved) {
+          seg.velPosture.x = (seg.pos.x - this.beatOnly[i].x) * invDt;
+          seg.velPosture.y = (seg.pos.y - this.beatOnly[i].y) * invDt;
+          seg.velPosture.z = (seg.pos.z - this.beatOnly[i].z) * invDt;
+        } else {
+          set(seg.velPosture, 0, 0, 0);
+        }
         // Internal angular momentum L = sum m * (r x v)
         const m = segs[i].mass;
         lx += m * (seg.pos.y * seg.velLocal.z - seg.pos.z * seg.velLocal.y);
@@ -425,11 +542,213 @@ export class FishBody {
       );
       set(this.prevInternalL, lx, ly, lz);
     } else {
-      for (let i = 0; i < n; i++) set(this.segments[i].velLocal, 0, 0, 0);
+      for (let i = 0; i < n; i++) {
+        set(this.segments[i].velLocal, 0, 0, 0);
+        set(this.segments[i].velPosture, 0, 0, 0);
+      }
       set(this.recoilTorque, 0, 0, 0);
     }
 
     this.commitPrevious();
+  }
+
+  /**
+   * Where every point of the body sits, in the body frame, for a given beat
+   * phase and posture. Returns how far the tail tip is off the centreline.
+   */
+  private layout(
+    amplitude: number,
+    bend: number,
+    pitchBend: number,
+    agility: number,
+    curl: number,
+    curlAt: number,
+    phase: number,
+    out: Vec3[],
+  ): number {
+    const L = this.morphology.standardLength;
+    const totalArc = this.morphology.totalArc;
+    const k = (2 * Math.PI) / (FISH.waveLengthRatio * L);
+    const segs = this.morphology.segments;
+    const n = segs.length;
+
+    // --- 1. Dense sample of the laterally offset centreline ---
+    for (let j = 0; j <= DENSE; j++) {
+      const arc = (j / DENSE) * totalArc;
+      // s is measured in body lengths, so it runs past 1 over the caudal fin and
+      // the amplitude envelope keeps growing — which is what makes the fin's
+      // trailing edge the biggest-amplitude part of the animal.
+      const s = arc / L;
+      const env = amplitudeEnvelope(s) * amplitude;
+      const theta = k * arc - phase;
+      const wave = Math.sin(theta);
+      const steer = bend * (1 + FISH.bendReflexGain * agility);
+      // Three things at once in a turn: the ordinary wave; the same wave beaten
+      // harder to one side (sin^2 is one-signed and largest at the extremes, so
+      // it is an amplitude asymmetry rather than a shift — see bendAsymmetry);
+      // and a camber of the whole body into the turn, which is the rudder.
+      const h =
+        env * wave +
+        steer * (FISH.bendAsymmetry * env * wave * wave + bendShape(s));
+      this.denseX[j] = h;
+      // Vertical bend. Gentler than the lateral one — a fish is far stiffer in
+      // that plane, which is why it turns much more readily than it climbs.
+      this.denseY[j] = pitchBend * bendShape(s) * 0.55;
+      this.denseZ[j] = -arc;
+    }
+    const excursion = Math.abs(this.denseX[DENSE]);
+
+    // --- 1b. The curl ---
+    //
+    // Laid on by turning each short piece of the centreline through an angle
+    // that grows from nothing behind the head to the full curl at the root of
+    // the tail fin, and adding the pieces up again. Turning the pieces keeps
+    // their lengths, so the body can fold through any angle without the shape
+    // above, which is drawn as a sideways offset from a straight line, having
+    // to describe a curve that doubles back on itself.
+    if (Math.abs(curl) > 1e-9) {
+      const full = curl * FISH.curlMax;
+      let prevX = this.denseX[0];
+      let prevZ = this.denseZ[0];
+      for (let j = 1; j <= DENSE; j++) {
+        const sMid = ((j - 0.5) / DENSE) * totalArc / L;
+        const angle = full * curlProfile(sMid, curlAt);
+        const c = Math.cos(angle);
+        const sn = Math.sin(angle);
+        const dx = this.denseX[j] - prevX;
+        const dz = this.denseZ[j] - prevZ;
+        prevX = this.denseX[j];
+        prevZ = this.denseZ[j];
+        this.denseX[j] = this.denseX[j - 1] + dx * c - dz * sn;
+        this.denseZ[j] = this.denseZ[j - 1] + dx * sn + dz * c;
+      }
+    }
+
+    // --- 2. Cumulative arc length along that curve ---
+    this.denseArc[0] = 0;
+    for (let j = 1; j <= DENSE; j++) {
+      const dx = this.denseX[j] - this.denseX[j - 1];
+      const dy = this.denseY[j] - this.denseY[j - 1];
+      const dz = this.denseZ[j] - this.denseZ[j - 1];
+      this.denseArc[j] = this.denseArc[j - 1] + Math.sqrt(dx * dx + dy * dy + dz * dz);
+    }
+
+    // --- 3. Resample at uniform arc length, so the body cannot stretch ---
+    let cursor = 0;
+    for (let i = 0; i < n; i++) {
+      const targetArc = segs[i].arc; // distance from the snout along the body
+      while (cursor < DENSE && this.denseArc[cursor + 1] < targetArc) cursor++;
+      const a0 = this.denseArc[cursor];
+      const a1 = this.denseArc[Math.min(cursor + 1, DENSE)];
+      const t = a1 > a0 ? (targetArc - a0) / (a1 - a0) : 0;
+      const j1 = Math.min(cursor + 1, DENSE);
+      const x = this.denseX[cursor] + (this.denseX[j1] - this.denseX[cursor]) * t;
+      const y = this.denseY[cursor] + (this.denseY[j1] - this.denseY[cursor]) * t;
+      const z = this.denseZ[cursor] + (this.denseZ[j1] - this.denseZ[cursor]) * t;
+      set(out[i], x, y, z);
+    }
+
+    // --- 5. Shift so the mass-weighted centroid is at the body-frame origin ---
+    //
+    // Without this the fish would translate itself by wiggling, with no water
+    // involved. See the note at the top of this file.
+    let cx = 0;
+    let cy = 0;
+    let cz = 0;
+    const M = this.morphology.totalMass;
+    for (let i = 0; i < n; i++) {
+      const m = segs[i].mass;
+      cx += out[i].x * m;
+      cy += out[i].y * m;
+      cz += out[i].z * m;
+    }
+    cx /= M;
+    cy /= M;
+    cz /= M;
+    for (let i = 0; i < n; i++) {
+      out[i].x -= cx;
+      out[i].y -= cy;
+      out[i].z -= cz;
+    }
+
+    return excursion;
+  }
+
+  private updateCurlWater(dt: number): void {
+    const cw = this.curlWater;
+    // The steering bend counts as well as the curl. It swings the tail and
+    // its fins a long way off the fish's line too (twenty degrees for an
+    // ordinary bend, over fifty for a startled one), and a fish that bent
+    // quickly while the sums still took it for a straight dart was thrown
+    // backwards at the speed limit, twelve body lengths a second.
+    const steer = this.actualBend * (1 + FISH.bendReflexGain * this.actualAgility);
+    if (Math.abs(this.actualCurl) < 1e-9 && Math.abs(steer) < 1e-9) {
+      if (cw.active) this.curlAngle.fill(0);
+      cw.active = false;
+      this.curlWaterFor = 0;
+      this.curlWaterSteer = 0;
+      this.finTurn = 0;
+      return;
+    }
+    if (
+      cw.active &&
+      this.actualCurl === this.curlWaterFor &&
+      this.actualCurlAt === this.curlWaterAt &&
+      steer === this.curlWaterSteer
+    ) {
+      this.finTurn = 0;
+      return;
+    }
+    this.curlWaterSteer = steer;
+    this.layout(0, this.actualBend, 0, this.actualAgility, this.actualCurl, this.actualCurlAt, 0, this.curlPos);
+    const segs = this.morphology.segments;
+    const n = segs.length;
+    let xx = 0;
+    let xz = 0;
+    let zz = 0;
+    let yaw = 0;
+    let xYaw = 0;
+    let zYaw = 0;
+    let turned = 0;
+    for (let i = 0; i < n; i++) {
+      const angle = this.actualCurl * FISH.curlMax * curlProfile(segs[i].s, this.actualCurlAt);
+      turned += this.finWeight[i] * (angle - this.curlAngle[i]);
+      this.curlAngle[i] = angle;
+      const a = this.curlPos[Math.max(0, i - 1)];
+      const b = this.curlPos[Math.min(n - 1, i + 1)];
+      const tx = b.x - a.x;
+      const tz = b.z - a.z;
+      const l = Math.hypot(tx, tz) || 1;
+      // Sideways to the centreline, in the plane of the curl.
+      const nx = tz / l;
+      const nz = -tx / l;
+      const m = segs[i].addedMassPerLength * segs[i].ds;
+      const r = this.curlPos[i];
+      const arm = r.z * nx - r.x * nz;
+      xx += m * nx * nx;
+      xz += m * nx * nz;
+      zz += m * nz * nz;
+      yaw += m * arm * arm;
+      xYaw += m * nx * arm;
+      zYaw += m * nz * arm;
+    }
+    // The water the fins carry sits well behind the centre of mass, so pushing
+    // the fish sideways also turns it, and turning it also pushes it sideways.
+    // A straight fish is treated as though that were not so (it is how the
+    // swimming was worked out and checked), so the link is brought in as the
+    // fish curls rather than all at once.
+    const t = Math.min(1, Math.abs(this.actualCurl) / 0.2);
+    const link = t * t * (3 - 2 * t);
+    cw.xx = xx;
+    cw.xz = xz * link;
+    cw.zz = zz;
+    cw.yaw = yaw;
+    cw.xYaw = xYaw * link;
+    cw.zYaw = zYaw * link;
+    cw.active = true;
+    this.curlWaterFor = this.actualCurl;
+    this.curlWaterAt = this.actualCurlAt;
+    this.finTurn = dt > 0 ? -turned / dt : 0;
   }
 
   private commitPrevious(): void {

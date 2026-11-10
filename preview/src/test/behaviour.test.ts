@@ -133,7 +133,11 @@ test('the fish swims about rather than bobbing on the spot', () => {
     minX = Math.min(minX, p.x);
     maxX = Math.max(maxX, p.x);
   });
-  assert.ok(path > 4, `the fish covered only ${path.toFixed(2)} m in two minutes`);
+  // Two and a half metres: a little under half a body length a second on
+  // average. It was four when the fish never stopped swimming. It now pauses
+  // and hangs in the water for part of the time, as a betta does, and covers
+  // about four metres in two minutes rather than nine.
+  assert.ok(path > 2.5, `the fish covered only ${path.toFixed(2)} m in two minutes`);
   assert.ok(
     vertical / path < 0.35,
     `${((100 * vertical) / path).toFixed(0)}% of the fish's movement was vertical; it is bobbing`,
@@ -433,4 +437,33 @@ test('dropped food lands on the water and sinks only once it is soaked', () => {
       'a floating pellet should sit on the surface',
     );
   }
+});
+
+test('left to itself the fish pauses, is not thrown about, and mostly keeps off the glass', () => {
+  // Measured before the fish was given a way to turn round and a reason to
+  // stop: in two hundred seconds it was never still, it touched glass or sand
+  // about 78 times a minute, and it hit the 12 body-lengths-a-second safety
+  // limit, thrown there by the glass or by its own quick bends. After: still 8
+  // to 18 per cent of the time, 24 to 30 touches a minute, top speed about 5.
+  // The limits below leave room either side of that without letting the old
+  // behaviour back in.
+  const world = new World({ seed: 7, timeScale: 1 });
+  const L = world.locomotion;
+  let still = 0;
+  let frames = 0;
+  let top = 0;
+  let touches = 0;
+  let touching = false;
+  run(world, 120, () => {
+    frames++;
+    if (L.speedSL < 0.15) still++;
+    top = Math.max(top, L.speedSL);
+    const c = L.forces.contact;
+    const now = Math.hypot(c.x, c.y, c.z) > 1e-6;
+    if (now && !touching) touches++;
+    touching = now;
+  });
+  assert.ok(still / frames > 0.03, `the fish was still only ${((100 * still) / frames).toFixed(1)}% of the time`);
+  assert.ok(top < 8, `the fish reached ${top.toFixed(1)} body lengths a second with nothing to flee from`);
+  assert.ok(touches < 100, `the fish touched glass or sand ${touches} times in two minutes`);
 });

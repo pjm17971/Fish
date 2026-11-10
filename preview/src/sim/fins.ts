@@ -175,6 +175,8 @@ export class FinCloth {
   private readonly dampingRate: number;
 
 
+  /** The tank's walls, for folding the fin against them. */
+  private glass: FishLocomotion['bounds'] = null;
   private readonly tmpA = v3();
   private readonly tmpB = v3();
   private readonly tmpC = v3();
@@ -328,6 +330,7 @@ export class FinCloth {
    */
   step(body: FishBody, loco: FishLocomotion, flow: BulkFlow | null, spread: number, dt: number): void {
     const sub = dt / FINS.substeps;
+    this.glass = loco.bounds;
     for (let s = 0; s < FINS.substeps; s++) {
       this.driveBase(body, loco, spread);
       this.sweepRays(flow, sub);
@@ -432,6 +435,18 @@ export class FinCloth {
         this.pos[i * 3] = this.pos[parent * 3] + dx * k;
         this.pos[i * 3 + 1] = this.pos[parent * 3 + 1] + dy * k;
         this.pos[i * 3 + 2] = this.pos[parent * 3 + 2] + dz * k;
+
+        // A fin pressed against the glass or the sand folds against it. The
+        // fish's own contact with the tank lets the soft end of the tail fin
+        // give (see accumulateContact in locomotion.ts), so without this the
+        // drawn fin would pass through the pane.
+        const gl = this.glass;
+        if (gl) {
+          const m = 0.0008;
+          this.pos[i * 3] = Math.max(gl.minX + m, Math.min(gl.maxX - m, this.pos[i * 3]));
+          this.pos[i * 3 + 1] = Math.max(gl.floorY + m, this.pos[i * 3 + 1]);
+          this.pos[i * 3 + 2] = Math.max(gl.minZ + m, Math.min(gl.maxZ - m, this.pos[i * 3 + 2]));
+        }
 
         // Velocity from what actually happened, so the projection cannot leave
         // energy behind in a velocity the position never took.

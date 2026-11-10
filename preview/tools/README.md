@@ -20,6 +20,7 @@ build`. Several of them run a long simulated time and take a minute or two.
 | `probe-onset` / `probe-onset2` | how quickly the fish gets moving from rest |
 | `probe-burst` | escape burst: peak acceleration and speed |
 | `probe-turn` | turning rate and radius against steering command |
+| `probe-life` | how the fish spends a few minutes left to itself: time in each speed band, time spent still and how long the pauses are, how much of the time the tail is beating and the pectorals rowing, how much is spent turning round, how often it touches glass or sand, and its share of time in each intention. `node tools/probe-life.mjs <seed> <seconds>`; `DIST=<folder>` runs it against another build, for a before and after |
 | `probe-spin` | angular dynamics in isolation, for the gyroscopic term |
 | `probe-inertia` | the mass and inertia tensor the morphology produces |
 | `probe-sweep` | a parameter sweep, for finding where something goes non-linear |
