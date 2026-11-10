@@ -59,6 +59,7 @@ import { FishBody } from './fishBody.js';
 import { FishLocomotion } from './locomotion.js';
 import { WaterSurface } from './water.js';
 import { Pellet } from './food.js';
+import { NavGrid } from './navigation.js';
 
 export type Intention =
   | 'escape'
@@ -210,6 +211,7 @@ const scratch = {
   tmp: v3(),
   tmp2: v3(),
   local: v3(),
+  away: v3(),
 };
 
 export class FishBrain {
@@ -322,6 +324,21 @@ export class FishBrain {
   private readonly rng: Rng;
   private readonly cfg: WorldConfig;
 
+  /**
+   * The route-finding grid, which knows where the wood, the stones and the
+   * plants are. Null in open-water tests, where the fish steers straight.
+   */
+  nav: NavGrid | null = null;
+  /** The route being followed, cube centres from the fish to its goal. */
+  readonly route: Vec3[] = [];
+  /** Where the route was planned to. */
+  private readonly routeGoal = v3();
+  private routeTimer = 0;
+  /** Where the fish is heading along its route this tick, for diagnostics; equal to the goal in open water. */
+  readonly waypoint = v3();
+  /** Whether the fish is following a route round something rather than heading straight for its goal. */
+  detouring = false;
+
   constructor(cfg: WorldConfig) {
     this.cfg = cfg;
     this.rng = new Rng(cfg.seed ^ 0x9e3779b9);
@@ -411,6 +428,30 @@ export class FishBrain {
     // shoved away from it — repeatedly, and forever. The fish starved next to
     // its food.
     p.wallDistance = Math.min(dxMin, dxMax, dzMin, dzMax, dyMin);
+
+    // The driftwood and the stones count as walls too, measured from the
+    // head (allowing for its own size) and from the middle of the body, and
+    // pushing away from them may be up as well as sideways: the way past a
+    // branch is often over it.
+    let hard = Infinity;
+    const ob = this.nav?.obstacles;
+    if (ob) {
+      const atSnout = ob.hardDistance(snout.x, snout.y, snout.z, scratch.away) - 0.003;
+      const atMiddle =
+        ob.hardDistance(loco.position.x, loco.position.y, loco.position.z, scratch.tmp) - FISH.maxDepth / 2;
+      hard = atSnout;
+      if (atMiddle < atSnout) {
+        hard = atMiddle;
+        copy(scratch.away, scratch.tmp);
+      }
+      // Counted at twice its distance. Judged like the glass, from three
+      // centimetres out, the wood beside the route the fish was following
+      // round it (findWay keeps it one to two centimetres clear) set off a
+      // swerve twenty to forty times in five minutes, mostly as the fish
+      // swam out of a turn, and each one threw it off its route.
+      hard *= 2;
+      p.wallDistance = Math.min(p.wallDistance, hard);
+    }
     set(p.wallAway, 0, 0, 0);
     if (p.wallDistance < INTENTION.wallAvoidDistance) {
       // Push away from every nearby wall at once, weighted by how close it is.
@@ -420,6 +461,7 @@ export class FishBrain {
       p.wallAway.x += w(dxMin) - w(dxMax);
       p.wallAway.z += w(dzMin) - w(dzMax);
       p.wallAway.y += w(dyMin);
+      addScaled(p.wallAway, scratch.away, w(hard));
       normalize(p.wallAway, p.wallAway);
     }
 
@@ -748,6 +790,10 @@ export class FishBrain {
       ),
       clamp(TANK_MIN_Z + ((iz + 0.5) / g.nz) * TANK.depth, TANK_MIN_Z + 0.055, TANK_MAX_Z - 0.055),
     );
+    // Not inside the wood or a stone, nor in the thick of a plant: somewhere
+    // to wander to is somewhere in the open. (The fish still goes into the
+    // plants on its way, where the way lies through them.)
+    if (this.nav) this.nav.openPoint(this.patrolTarget, this.patrolTarget, 1.5);
   }
 
   private pickRestTarget(): void {
@@ -1160,6 +1206,57 @@ export class FishBrain {
   }
 
   // -------------------------------------------------------------------------
+  // Finding a way round things
+  // -------------------------------------------------------------------------
+
+  /**
+   * Replace `target` with the point the fish should head for to get there
+   * round the wood, the stones and the thick of the plants: the target
+   * itself when the way is clear, which in open water it nearly always is.
+   */
+  private findWay(target: Vec3, loco: FishLocomotion, dt: number): void {
+    const nav = this.nav;
+    this.detouring = false;
+    if (!nav) return;
+    const pos = loco.position;
+    // Straight there, if nothing is in the way: no wood or stone, and no
+    // more plant than there is at the goal itself (food lying in a plant
+    // has to be gone in for).
+    const allowance = Math.max(1, nav.costOf(target));
+    if (nav.lineCost(pos, target) <= allowance) {
+      this.route.length = 0;
+      return;
+    }
+    // Otherwise follow a route, planned afresh when the goal has moved or
+    // every so often as the fish drifts off it.
+    this.routeTimer -= dt;
+    if (this.route.length < 2 || dist(this.routeGoal, target) > 0.015 || this.routeTimer <= 0) {
+      nav.plan(pos, target, this.route);
+      copy(this.routeGoal, target);
+      this.routeTimer = 0.6;
+    }
+    const r = this.route;
+    if (r.length < 2) return;
+    // Head for the furthest point along the route that can be seen in a
+    // clear line, no dearer than the route itself is up to there. That cuts
+    // the corners off the cubes, as a fish swimming through would.
+    let best = 0;
+    let routeWorst = 0;
+    for (let i = 1; i < r.length; i++) {
+      routeWorst = Math.max(routeWorst, nav.costOf(r[i]));
+      if (nav.lineCost(pos, r[i]) <= routeWorst + 0.25) best = i;
+      else if (dist(pos, r[i]) > 0.06) break;
+    }
+    if (best === r.length - 1 && nav.lineCost(pos, target) <= routeWorst + 0.25) return;
+    // Not too close: aiming at a point a centimetre away turns the fish round
+    // the moment it passes it.
+    let i = Math.max(1, best);
+    while (i < r.length - 1 && dist(pos, r[i]) < 0.02) i++;
+    copy(target, r[i]);
+    this.detouring = true;
+  }
+
+  // -------------------------------------------------------------------------
   // Steering: motor goal -> muscle command
   // -------------------------------------------------------------------------
 
@@ -1211,6 +1308,21 @@ export class FishBrain {
     g.target.z = clamp(g.target.z, TANK_MIN_Z + 0.03, -0.03);
     // The centre of mass cannot go lower than the anal fin allows.
     g.target.y = clamp(g.target.y, TANK.floorY + 0.026, TANK.waterY - 0.004);
+
+    // Find a way there round whatever is in between. Not in a fright, which
+    // is a reflex; not while flaring or taking a breath, which happen where
+    // the fish already is; and not while it hangs still.
+    const routed =
+      !holding &&
+      this.intention !== 'escape' &&
+      this.intention !== 'flare' &&
+      !(this.intention === 'surface' && this.surfacePhase === 'gulp');
+    if (routed) this.findWay(g.target, loco, dt);
+    else {
+      this.route.length = 0;
+      this.detouring = false;
+    }
+    copy(this.waypoint, g.target);
 
     sub(scratch.toTarget, g.target, loco.position);
     const distance = len(scratch.toTarget);

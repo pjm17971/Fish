@@ -36,6 +36,7 @@ import {
   SURFACE_CLEARANCE,
   leafMidrib,
   plantLayout,
+  widthProfile,
 } from '../sim/scenery.js';
 import { v3, Vec3, cross, normalize, sub, dot, len, add, scale } from '../sim/math.js';
 import { VERTEX_FLOATS } from './meshes.js';
@@ -604,19 +605,6 @@ export function buildHardscape(): BuiltMesh {
 // ---------------------------------------------------------------------------
 // Plants
 // ---------------------------------------------------------------------------
-
-function widthProfile(shape: LeafSpec['shape'], t: number): number {
-  switch (shape) {
-    case 'lance':
-      return Math.sin(Math.PI * Math.pow(t, 0.75));
-    case 'ribbon':
-      return Math.min(1, (1 - t) / 0.12) * (0.8 + 0.2 * Math.min(1, t / 0.06));
-    case 'blade':
-      return Math.pow(1 - t, 0.8);
-    case 'oval':
-      return Math.pow(Math.sin(Math.PI * t), 0.7);
-  }
-}
 
 /**
  * A leaf as a strip three vertices wide — edge, midrib, edge — so it can be

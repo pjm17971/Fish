@@ -92,11 +92,12 @@ import {
   normalize,
   quatRotate,
 } from './math.js';
-import { FINS, FISH, RHO_WATER } from './config.js';
+import { FINS, FISH, RHO_WATER, TANK } from './config.js';
 import { Morphology } from './morphology.js';
 import { FishBody } from './fishBody.js';
 import { FishLocomotion } from './locomotion.js';
-import { BulkFlow } from './water.js';
+import { BulkFlow, WaterSurface } from './water.js';
+import { Obstacles } from './obstacles.js';
 
 /** Where one ray root is pinned on the body. */
 export interface Attachment {
@@ -177,6 +178,9 @@ export class FinCloth {
 
   /** The tank's walls, for folding the fin against them. */
   private glass: FishLocomotion['bounds'] = null;
+  /** The wood and stones, and the water surface, which the fin also folds against. */
+  private obstacles: Obstacles | null = null;
+  private water: WaterSurface | null = null;
   private readonly tmpA = v3();
   private readonly tmpB = v3();
   private readonly tmpC = v3();
@@ -294,6 +298,15 @@ export class FinCloth {
     );
     normalize(this.tmpC, this.tmpC);
     return quatRotate(out, loco.orientation, this.tmpC);
+  }
+
+  /**
+   * What else the fin can meet: the driftwood and stones, and the water
+   * surface. Left unset, the fin knows only the glass and the sand.
+   */
+  setSurroundings(obstacles: Obstacles | null, water: WaterSurface | null): void {
+    this.obstacles = obstacles;
+    this.water = water;
   }
 
   /** Lay the fin out straight along its rest direction. */
@@ -446,6 +459,29 @@ export class FinCloth {
           this.pos[i * 3] = Math.max(gl.minX + m, Math.min(gl.maxX - m, this.pos[i * 3]));
           this.pos[i * 3 + 1] = Math.max(gl.floorY + m, this.pos[i * 3 + 1]);
           this.pos[i * 3 + 2] = Math.max(gl.minZ + m, Math.min(gl.maxZ - m, this.pos[i * 3 + 2]));
+        }
+        // And against the driftwood and the stones, the same way: a fin that
+        // meets a branch drapes over it.
+        const ob = this.obstacles;
+        if (ob) {
+          const m = 0.0008;
+          const d = ob.hardDistance(this.pos[i * 3], this.pos[i * 3 + 1], this.pos[i * 3 + 2], this.tmpN, 0.002);
+          if (d < m) {
+            this.pos[i * 3] += this.tmpN.x * (m - d);
+            this.pos[i * 3 + 1] += this.tmpN.y * (m - d);
+            this.pos[i * 3 + 2] += this.tmpN.z * (m - d);
+          }
+        }
+        // A fin does not stand up out of the water. Above the surface it
+        // has nothing to hold it up, and it falls back and lies along it.
+        // (Measured before this: a fin stood up to sixteen millimetres out
+        // of the water, rigid as it is under it, and some fin was out for
+        // an eighth to a fifth of the fish's life, mostly while it cruised
+        // just under the surface.)
+        const wa = this.water;
+        if (wa && this.pos[i * 3 + 1] > TANK.waterY - 0.006) {
+          const top = wa.heightAt(this.pos[i * 3], this.pos[i * 3 + 2]) - 0.0004;
+          if (this.pos[i * 3 + 1] > top) this.pos[i * 3 + 1] = top;
         }
 
         // Velocity from what actually happened, so the projection cannot leave

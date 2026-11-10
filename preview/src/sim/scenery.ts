@@ -185,6 +185,20 @@ export interface LeafSpec {
 /** Leaves stay this far under the still waterline; ribbons that reach it trail along it. */
 export const SURFACE_CLEARANCE = 0.003;
 
+/** How wide a leaf of each shape is at `t` along it, 0 to 1 of its full width. */
+export function widthProfile(shape: LeafSpec['shape'], t: number): number {
+  switch (shape) {
+    case 'lance':
+      return Math.sin(Math.PI * Math.pow(t, 0.75));
+    case 'ribbon':
+      return Math.min(1, (1 - t) / 0.12) * (0.8 + 0.2 * Math.min(1, t / 0.06));
+    case 'blade':
+      return Math.pow(1 - t, 0.8);
+    case 'oval':
+      return Math.pow(Math.sin(Math.PI * t), 0.7);
+  }
+}
+
 /** A point along a leaf's midrib. */
 export interface MidribPoint {
   /** Position, before the leaf's edges are pressed under the surface. */
